@@ -1,0 +1,16 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+*.swp
+*.swo
+build/
+
+# Python artifacts
+__pycache__/
+*.pyc
+
+# Project generated files (not the source)
+exec_summary_spec.json
+code_listing_spec.json
