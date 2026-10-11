@@ -11,13 +11,15 @@
   <a href="#quick-start">Quick Start</a> •
   <a href="#how-it-works">How It Works</a> •
   <a href="#confidence-scoring">Confidence Model</a> •
-  <a href="#deployment">Deployment</a> •
+  <a href="#fusion-architecture">Fusion Design</a> •
   <a href="#roadmap">Roadmap</a>
 </p>
 
 <p align="center">
   <img src="assets/architecture.png" alt="System Architecture" width="90%">
 </p>
+
+> ⚠️ **Status: Work in progress.** The single-node ESP32 detector (2.4 GHz, firmware + docs below) is a complete implementation of the source paper. The **fusion architecture** — combining Remote ID cooperative detection with behavioral traffic fingerprinting — is **design-stage and not implemented**. See [`docs/FUSION_DESIGN.md`](docs/FUSION_DESIGN.md) for current findings, open questions, and the build plan.
 
 ---
 
@@ -244,6 +246,65 @@ The analysis above applies to Wi‑Fi drones. **FPV drones are invisible to the 
 
 ---
 
+## Fusion Architecture
+
+> **Design stage — not implemented.** Full findings, open questions, and build plan: [`docs/FUSION_DESIGN.md`](docs/FUSION_DESIGN.md)
+
+<p align="center">
+  <img src="assets/fusion_architecture.png" alt="Fusion Architecture" width="95%">
+</p>
+
+### The Problem With Two Parallel Pipelines
+
+Remote ID and traffic fingerprinting are not two modes of one sensor. They are two *categories of evidence*:
+
+| | Remote ID | Traffic Fingerprint |
+|---|---|---|
+| Evidence type | **Declarative** — self-reported | **Behavioral** — inferred |
+| Time to answer | ~1 packet (instant) | 50–170 packets (~1–3 s) |
+| Coverage | Cooperative drones only | Cooperative **and** non-cooperative |
+| Spoofable | **Trivially** | Requires emulating a drone RF profile |
+| Metadata | Rich: ID, operator location | Rich post-WPA2: telemetry, video |
+
+Two disconnected pipelines produce double reporting (one alert per pipeline for the same aircraft), inconsistent confidence scales, and — critically — **no ability to detect a Remote ID spoofer**. RID is a broadcast, not an authenticated handshake; open-source spoofers generate valid ASTM F3411 payloads that appear as legitimate aircraft on compliant receivers.
+
+A single fusion engine correlates both by MAC inside a sliding window and resolves to one classification and one alert.
+
+### The Classification Matrix
+
+| | **Traffic signature present** | **No traffic signature** |
+|---|---|---|
+| **RID present** | ✅ **Confirmed cooperative drone** — identified, near. Log and track. | ⚠️ **Suspect** — most likely out of behavioral range, or a spoofer. Flag, do not alert. |
+| **RID absent** | 🔴 **Non-cooperative drone** — highest priority. RID disabled, pre-RID, homebrew, or FPV-on-Wi-Fi. | 🔕 Ambient. No action. |
+
+**The bottom-left cell is the reason for this work.** It is the drone that does not wish to be seen — and it is exactly what a Remote ID-only system cannot detect.
+
+**The top-right cell is the bonus** that two disconnected pipelines can never produce.
+
+### The Range Asymmetry — Read Before Interpreting the Matrix
+
+| Signal | Practical reach |
+|--------|----------------|
+| Wi-Fi Remote ID | **1–5 miles** |
+| BLE Remote ID | 100–300 m |
+| Behavioral traffic capture | **~50–150 m** |
+
+The behavioral layer sees roughly an order of magnitude less distance than Wi-Fi RID. **A RID detection with no traffic signature almost always means "the drone is far away," not "someone is spoofing."** Spoofer detection only becomes credible when the RID signal is strong enough to imply local origin.
+
+The near-term value of the traffic layer is therefore **proximity validation** — telling you which of your RID contacts are actually nearby — plus non-cooperative detection.
+
+### Integration Notes
+
+The existing DroneAware node already runs a **monitor-mode Wi-Fi adapter** (ALFA AWUS036ACS or Panda PAU0B) alongside a **separate BLE dongle** (Sena UD100). RID beacons are one frame type among all 802.11 frames that adapter already sees — so the radio architecture for behavioral analysis is already in place.
+
+The real constraint is **channel dwell**. Hopping channels to hunt RID beacons means observing roughly 1/13 of any given drone's traffic. Retune cost varies sharply by adapter (22 ms on the RTL8821AU vs 1007 ms on the MT7612U), and a community bench measured RID capture improving from **51% → 72%** purely by swapping adapters.
+
+**Recommended:** add a dedicated ~$25 monitor-mode adapter for the traffic layer rather than degrade the node's own RID capture.
+
+The node software is licensed with a defined collection scope, and binaries are Sigstore-attested. **Extend by consuming the local API, not by modifying the feeders** — that keeps the node stock and the attestation valid.
+
+---
+
 ## Project Structure
 
 ```
@@ -253,12 +314,14 @@ esp32-drone-detector/
 ├── docs/
 │   ├── SPEC.md                     ← Reverse‑engineered architecture spec
 │   ├── TECHNICAL_BRIEF.md          ← Full team engineering briefing
+│   ├── FUSION_DESIGN.md            ← ⚠️ WIP: fusion design, findings, open questions
 │   ├── ESP32_Drone_Detector_Executive_Summary.pdf ← 3‑page exec overview
 │   └── Drone_Traffic_Fingerprinting_Deep_Analysis.pdf ← 6‑page deep analysis
 ├── assets/
 │   ├── architecture.png            ← System diagram
 │   ├── confidence_model.png        ← Scoring visual
-│   └── hybrid_approach.png         ← 2‑ESP32 band coverage diagram
+│   ├── hybrid_approach.png         ← 2‑ESP32 band coverage diagram
+│   └── fusion_architecture.png     ← Cooperative + behavioral fusion design
 └── README.md                       ← You are here
 ```
 
@@ -266,26 +329,50 @@ esp32-drone-detector/
 
 ## Roadmap
 
-| Phase | Capability | Priority |
-|-------|------------|----------|
-| **1 — Current** | Single‑node, 2.4 GHz, 4‑factor confidence model | ✅ |
-| **2 — OUI Expansion** | 50+ fingerprints, 5 GHz channel set | 🔜 Next |
-| **3 — Multi‑Node (Hybrid)** | 2× ESP32: 2.4 GHz + 5 GHz for full band coverage | 📅 |
-| **3 — WPA2 Key Capture** | Log 4‑way handshake, post‑process DUML protocol | 📅 |
-| **4 — ML Classification** | TinyML on 5 traffic layers for false‑positive reduction | 📅 |
-| **5 — Protocol Detection** | MAVLink / CRSF / ELRS signature recognition (beyond Wi‑Fi) | 📅 |
+| Phase | Capability | Status |
+|-------|------------|--------|
+| **1 — Single‑node detector** | 2.4 GHz, 4‑factor confidence model — matches source paper | ✅ Done |
+| **2 — 5‑layer model** | Rebalanced weights: direction ratio + packet size + timing elevated above OUI | 🔜 Next |
+| **3 — OUI + band expansion** | 50+ fingerprints, 5 GHz channel set | 📅 |
+| **4 — Hybrid two‑node** | 2× ESP32: 2.4 GHz + 5 GHz for full band coverage | 📅 |
+| **5 — Fusion design** | Remote ID + behavioral in one engine. See [`docs/FUSION_DESIGN.md`](docs/FUSION_DESIGN.md) | 🟡 **WIP — design stage** |
+| **6 — WPA2 key capture** | Log 4‑way handshake, post‑process DUML protocol | 📅 |
+| **7 — ML classification** | TinyML across traffic layers for false‑positive reduction | 📅 |
+| **8 — Beyond Wi‑Fi** | MAVLink / CRSF / ELRS signature recognition, SDR for FPV | 📅 |
+
+**Open work is tracked in [`docs/FUSION_DESIGN.md` §7 (Open Questions)](docs/FUSION_DESIGN.md).** The blocking item is confirming what the DroneAware node's local `api.py` exposes.
 
 ---
 
 ## References
 
-- **Original paper:** Meet Patel, Tejas Patil, Jatin Solanki, Hrushikesh Vibhute — *ESP32-Based Passive Wi‑Fi Drone Detection with Confidence‑Weighted Fingerprinting*. IJRPR Vol 7(4), Apr 2026. [PDF](https://ijrpr.com/uploads/V7ISSUE4/IJRPR62362.pdf)
-- **Welford, B.P.** (1962). *Note on a Method for Calculating Corrected Sums of Squares and Products.* Technometrics 4(3), 419‑420.
-- **IEEE 802.11‑2020** — IEEE Standard for Information Technology.
+**Primary source**
+- **Original paper:** Meet Patel, Tejas Patil, Jatin Solanki, Hrushikesh Vibhute — *ESP32-Based Passive Wi-Fi Drone Detection with Confidence-Weighted Fingerprinting*. IJRPR Vol 7(4), Apr 2026. [PDF](https://ijrpr.com/uploads/V7ISSUE4/IJRPR62362.pdf)
+
+**Protocol reverse engineering**
+- **Christof, T.** (2021). *DJI Wi-Fi Protocol Reverse Engineering.* JKU Linz MSc thesis. Four-layer protocol architecture, full packet structure, payload encryption analysis. [PDF](https://www.digidow.eu/publications/2021-christof-masterthesis/Christof_2021_MasterThesis_DJIProtocolReverseEngineering.pdf)
+- **Behind The Wings** (2023). *Reverse Engineering and Drone Hijacking in DJI Enhanced Wi-Fi Protocol.* arXiv:2309.05913. [PoC](https://github.com/ibndias/dji-drone-hijacking)
+- **luyii-code-1** (2026). *DJI OcuSync DroneID Research* — O2/O4 PHY, packet, and cryptographic analysis. [GitHub](https://github.com/luyii-code-1/dji-ocusync-droneid-research)
+
+**Encrypted traffic classification**
+- **Sciancalepore et al.** (2019). *Detecting Drones Status via Encrypted Traffic Analysis.* ACM WiSec.
+- **Bisio et al.** (2018). *Unauthorized Amateur UAV Detection Based on WiFi Statistical Fingerprint Analysis.* IEEE.
+
+**Remote ID / cooperative detection**
+- **ASTM F3411-19** — *Standard Specification for Remote ID and Tracking.* [PDF](https://thedroneprofessor.com/wp-content/uploads/2022/11/F3411.40165-UAS-Remote-ID.pdf)
+- **Open Drone ID** — *opendroneid-core-c* reference library. [GitHub](https://github.com/opendroneid/opendroneid-core-c)
+- **DroneAware Network** — community Remote ID receiver network; node build guide and hardware list. [droneaware.io](https://droneaware.io/build-a-raspberry-pi-remote-id-receiver.html) · [node releases](https://github.com/fduflyer/DroneAware-Node-Releases)
+
+**Adversarial considerations**
+- **droneRemoteIDSpoofer** — demonstrates unauthenticated RID broadcast vulnerability. [GitHub](https://github.com/DavidAlexanderW/droneRemoteIDSpoofer)
+
+**Algorithms**
+- **Welford, B.P.** (1962). *Note on a Method for Calculating Corrected Sums of Squares and Products.* Technometrics 4(3), 419-420.
+- **IEEE 802.11-2020** — IEEE Standard for Information Technology.
 
 ---
 
 <p align="center">
-  <sub>Reverse‑engineered and implemented by <b>C4C Engineering</b>.</sub><br>
+  <sub>Reverse-engineered and implemented by <b>C4C Engineering</b>.</sub><br>
   <sub>Open source. Passive. No transmission. $5 hardware.</sub>
 </p>
