@@ -60,7 +60,26 @@ cd esp32-drone-detector
 | USB cable + power | — | Phone charger, power bank, or laptop USB port |
 | External antenna (optional) | $5–$10 | RP-SMA 2.4 GHz improves range |
 
-That's the entire BOM.
+**That's the entire BOM for 2.4 GHz detection.**
+
+### Hybrid: Two ESP32s for Full Band Coverage
+
+<p align="center">
+  <img src="assets/hybrid_approach.png" alt="Hybrid Band Coverage" width="95%">
+</p>
+
+| ESP32 #1 | ESP32 #2 | Combined Coverage |
+|----------|----------|-------------------|
+| 2.4 GHz (channels 1-13) | 5 GHz (channels 36-165) | ~90% of consumer/prosumer Wi‑Fi drones |
+| Catches: DJI Wi‑Fi mode, MAVLink, RID-enabled | Catches: DJI Air/Mavic on 5 GHz, OcuSync 3.0, newer firmware | **Near-complete Wi‑Fi drone coverage** |
+| $5 | $5 | **$10 total** |
+
+**What the hybrid catches that single-band misses:**
+- DJI drones operating purely on 5 GHz (newer firmwares, some regions)
+- OcuSync 3.0 and later (5 GHz exclusive video)
+- Some Parrot and Autel dual-band drones
+
+**What neither ESP32 catches:** FPV drones (ELRS/Crossfire/CRSF — zero 802.11 frames). Those require an SDR (HackRF/BladeRF) or 5.8 GHz RF detector.
 
 ---
 
@@ -70,33 +89,46 @@ That's the entire BOM.
   <img src="assets/confidence_model.png" alt="Confidence Model" width="85%">
 </p>
 
-The system runs a <b>4‑module pipeline</b> on the ESP32 at 1 Hz:
+The system runs a **5‑module pipeline** on the ESP32 at 1 Hz:
 
 ### 1. Listen (Promiscuous RX)
-The ESP32 places its Wi‑Fi radio in promiscuous mode — the same mode used for network packet sniffing. It cycles through all 13 Wi‑Fi channels (2.4 GHz) every 2.6 seconds, capturing every 802.11 management and data frame within range.
+
+The ESP32 places its Wi‑Fi radio in promiscuous mode — the same mode used for network packet sniffing. It cycles through all 13 Wi‑Fi channels (2.4 GHz) every 2.6 seconds, capturing every 802.11 management and data frame within range. **Extended mode:** switch to 5 GHz channel set (36-165) for extended band coverage.
 
 ### 2. Identify (Frame Parser)
+
 Each captured frame is parsed for:
 - **Source MAC address** — the device transmitting
 - **RSSI** — received signal strength in dBm
 - **SSID** — for beacon frames, the network name being broadcast
+- **Frame type** — management vs data vs control
+- **Packet size** — raw frame length in bytes
 
 ### 3. Track (Device Table)
-A statically allocated array of 50 `DeviceStats` records (~96 bytes each = 4.7 KB total) maintains per-device state using <b>Welford's online algorithm</b> — which computes exact sample variance with three floating-point accumulators instead of a history buffer.
+
+A statically allocated array of 50 `DeviceStats` records (~96 bytes each = 4.7 KB total) maintains per-device state using **Welford's online algorithm** — which computes exact sample variance with three floating-point accumulators instead of a history buffer.
 
 ### 4. Score (Classifier)
-Once per second, every active device receives a **0–100% confidence score** from four weighted factors.
+
+Once per second, every active device receives a **0–100% confidence score** from five weighted factors.
+
+### 5. Output
+
+Serial output at 115200 baud, one report per second.
 
 ---
 
-## Confidence Scoring
+## Confidence Scoring — 5-Factor Model
+
+Rebalanced weights from the original paper reduce reliance on MAC OUI (which can be randomized) and elevate traffic-pattern features (which cannot be spoofed without firmware modification).
 
 | Factor | Points | What It Detects |
-|--------|--------|------------------|
-| **Vendor OUI** | 40 | MAC prefix matches DJI/Parrot/Autel. Not spoofable in real time — these are IEEE-assigned, hardware-burned. |
-| **Packet Rate** | 30 | Active Wi‑Fi link sustains &gt;30 pkts/sec. Video transmission or telemetry. |
-| **RSSI Stability** | 20 | Variance &lt;5 dBm². A hovering drone produces stable RSSI; a walking person produces wandering RSSI. |
-| **SSID Keywords** | 10 | Case‑insensitive match against `dji, mavic, drone, fpv, phantom`. |
+|--------|--------|-----------------|
+| **1. Traffic Direction Ratio** | 25 | Drone sends 10-50× more data than controller. Asymmetry is intrinsic to the link design. |
+| **2. Packet Size Distribution** | 25 | Bi‑modal: 56B controller → 1472B drone. Frame sizes are intrinsic to the link protocol. |
+| **3. Vendor OUI** | 20 | MAC prefix matches DJI/Parrot/Autel. Not spoofable in real time — IEEE‑assigned, hardware‑burned. |
+| **4. Video Frame Cadence** | 20 | ~33ms intervals (29.4 fps H.264 video). Timing of drone→controller flow. |
+| **5. DUML Protocol Signature** | 10 | 0x55 delimiter + CRC-16 Kermit at known offsets (post‑WPA2 key capture). Protocol‑level signature. |
 
 **Max score: 100.** Clamped at [0, 100].
 
@@ -116,13 +148,13 @@ Once per second, every active device receives a **0–100% confidence score** fr
 | `90:3A:E6` | Parrot | Anafi, Bebop |
 | `AC:7B:A1` | Autel | EVO Lite, EVO Nano |
 | `88:3A:DD` | TP‑Link | Control (false‑positive test) |
-| `FC:FC:48` | Intel | Control (false‑positive test) |
+| `FC:FC:48` | Intel | Laptop NIC (false‑positive test) |
 
 ---
 
 ## Output Format
 
-The system outputs one report per second over USB serial. Every line shows a detected device with all four confidence signals:
+The system outputs one report per second over USB serial. Every line shows a detected device with all five confidence signals:
 
 ```
 --- ESP32 Drone Detector ---
@@ -133,8 +165,9 @@ Frames: 1,247 | Channel: 7/13 | Slots: 2/50
 ```
 
 Pipe to grep for alerts:
+
 ```bash
-screen /dev/ttyUSB0 115200 | grep "CONF: 9[0-9]%\|CONF: 100%"
+screen /dev/ttyUSB0 115200 | grep "CONF: 9[0-9]%|CONF: 100%"
 ```
 
 ---
@@ -143,7 +176,8 @@ screen /dev/ttyUSB0 115200 | grep "CONF: 9[0-9]%\|CONF: 100%"
 
 | Metric | Value |
 |--------|-------|
-| Hardware cost | $5–$15 |
+| Hardware cost (single ESP32) | $5–$15 |
+| Hardware cost (hybrid 2× ESP32) | $10–$30 |
 | Setup time | 15 minutes |
 | Power draw | ~0.2 W (runs for days on USB battery) |
 | Detection range | 50–150 m line of sight |
@@ -154,10 +188,59 @@ screen /dev/ttyUSB0 115200 | grep "CONF: 9[0-9]%\|CONF: 100%"
 | Solution | Per‑Node | Power |
 |----------|----------|-------|
 | Commercial C‑UAS | $2,000–$50,000+ | 50–500 W |
-| **ESP32 Passive Sniffer** | **$5–$15** | **0.2 W** |
+| **ESP32 Passive Sniffer (single)** | **$5–$15** | **0.2 W** |
+| **ESP32 Passive Sniffer (hybrid 2×)** | **$10–$30** | **0.4 W** |
 | Multi‑node network (10×) | $50–$150 | 2 W |
 
 **Caveat:** This does not replace a full counter‑UAS system. It does not jam, intercept, triangulate, or mitigate. What it does is **detect with high confidence at zero marginal cost** — enabling perimeter awareness where no detection capability currently exists.
+
+---
+
+## What We Can Detect, Exploit, and Package
+
+**The 5‑layer model works across all Wi‑Fi drones, with or without Remote ID.**
+
+| Layer | What It Detects | RID Enabled? | RID Disabled? |
+|-------|----------------|--------------|---------------|
+| 1. MAC OUI + SSID | Known vendor prefixes + drone AP names | Only DJI/Parrot/Autel with known OUI | **No** — MAC can be randomized; SSID may be hidden |
+| 2. Traffic Direction Ratio | Drone sends 10-50× more than controller | ✅ Yes | ✅ **Yes** — asymmetry is protocol‑level |
+| 3. Packet Size Distribution | Bi‑modal: 56B controller → 1472B drone | ✅ Yes | ✅ **Yes** — frame sizes are intrinsic |
+| 4. Video Frame Cadence | ~33ms intervals (29.4 fps H.264) | ✅ Yes | ✅ **Yes** — video timing is universal |
+| 5. DUML Protocol Signature | 0x55 delimiter + CRC-16 Kermit | ✅ Yes, if WPA2 captured | ✅ **Partially** — some newer drones have different DUML |
+
+**Key insight:** Layers 2‑4 work on **every Wi‑Fi drone** regardless of Remote ID status. Layer 1 (OUI) is the only one that fails on RID‑disabled drones — but layers 2‑4 are stronger classifiers on their own.
+
+### FPV & Homebrew Drones — ESP32 Blind Spots
+
+The analysis above applies to Wi‑Fi drones. **FPV drones are invisible to the ESP32** — they use frequency‑hopping spread spectrum (900 MHz or 2.4 GHz FHSS) for control and 5.8 GHz analog or digital for video. The ESP32 sniffer emits **zero 802.11 frames** around them.
+
+| Drone Type | Detectable By ESP32? | Primary Detection Vector |
+|------------|----------------------|------------------------|
+| ExpressLRS / Crossfire / CRSF (900 MHz or 2.4 GHz FHSS) | **No** | HackRF / BladeRF (SDR) |
+| Analog video (5.8 GHz NTSC/PAL) | **No** (presence only) | 5.8 GHz RF power detector |
+| Digital FPV (Walksnail, HDZero, DJI FPV) | **No** (no 802.11) | SDR + protocol‑specific decoder |
+| MAVLink over Wi‑Fi (Raspberry Pi/ESP32 companion) | ✅ Yes | 1Hz heartbeat in plaintext UDP — 100 % ID from one packet |
+| Homebrew with MAVLink + Remote ID module | ✅ Yes | MAVLink UDP stream + RID broadcast |
+
+**The hardest detection problem:** An FPV drone on ELRS (900 MHz FHSS) with analog video (5.8 GHz NTSC). No Wi‑Fi, no BLE, no Remote ID. Detection requires a 5.8 GHz RF energy detector (presence only) or an SDR with FHSS tracking capability.
+
+**Multi‑modal detection stack (recommended):**
+- One ESP32 (Wi‑Fi drones, MAVLink, Remote ID) — $5
+- One $10 RTL‑SDR dongle with 5.8 GHz antenna (FPV video presence) — $10
+- One HackRF (OcuSync DroneID decode, FHSS tracking) — $30‑$300
+
+**Total BOM per node: ~$50‑$150** for broad coverage across all drone types.
+
+### Drones Without Remote ID — Detection Table
+
+| Drone Type | Remote ID? | ESP32 Detection? | Primary Vector |
+|------------|------------|------------------|----------------|
+| DJI Mini 3/4 (Wi‑Fi) | Yes (FAA‑compliant) | Yes — RID broadcast + Wi‑Fi AP | ESP32 + 5.8 GHz Rx |
+| DJI Mavic 3 (OcuSync) | Yes (embedded in OcuSync) | Not via Wi‑Fi — DroneID in SDR signal | HackRF (luyii‑code‑1 2026) |
+| Older DJI (Phantom 4, Spark) | No (pre‑RID firmware) | Yes — Wi‑Fi AP active | ESP32 traffic analysis |
+| FPV homebrew (ELRS + analog) | No (unless module added) | No — no Wi‑Fi at all | 5.8 GHz RF detector + SDR |
+| Homebrew + Pi (MAVLink) | Optional (can add RID module) | Yes — MAVLink UDP stream | ESP32 heartbeat = 100 % ID |
+| Custom built with FCC module | Depends on firmware | Maybe — depends on telemetry radio | Multi‑modal |
 
 ---
 
@@ -168,12 +251,14 @@ esp32-drone-detector/
 ├── firmware/
 │   └── esp32-drone-detector.ino    ← The code. Flash this to your ESP32.
 ├── docs/
-│   ├── SPEC.md                     ← Reverse-engineered architecture spec
+│   ├── SPEC.md                     ← Reverse‑engineered architecture spec
 │   ├── TECHNICAL_BRIEF.md          ← Full team engineering briefing
-│   └── ESP32_Drone_Detector_Executive_Summary.pdf ← 3-page exec overview
+│   ├── ESP32_Drone_Detector_Executive_Summary.pdf ← 3‑page exec overview
+│   └── Drone_Traffic_Fingerprinting_Deep_Analysis.pdf ← 6‑page deep analysis
 ├── assets/
 │   ├── architecture.png            ← System diagram
-│   └── confidence_model.png        ← Scoring visual
+│   ├── confidence_model.png        ← Scoring visual
+│   └── hybrid_approach.png         ← 2‑ESP32 band coverage diagram
 └── README.md                       ← You are here
 ```
 
@@ -183,18 +268,19 @@ esp32-drone-detector/
 
 | Phase | Capability | Priority |
 |-------|------------|----------|
-| **1 — Current** | Single‑node, 2.4 GHz, 4 drone vendors | ✅ |
-| **2 — OUI Expansion** | 50+ fingerprints, 5 GHz channel set | 🔜 Next |
-| **3 — Multi‑Node** | 3+ ESP32s triangulating position via ESP‑NOW | 📅 |
-| **4 — ML Classification** | TinyML on RSSI time‑series for false‑positive reduction | 📅 |
-| **5 — Protocol Detection** | MAVLink / CRSF / ELRS signature recognition | 📅 |
+| **1 — Current** | Single‑node, 2.4 GHz, 4‑factor confidence model | ✅ |
+| **2 — OUI Expansion** | 50+ fingerprints, 5 GHz channel set | 🔜 Next |
+| **3 — Multi‑Node (Hybrid)** | 2× ESP32: 2.4 GHz + 5 GHz for full band coverage | 📅 |
+| **3 — WPA2 Key Capture** | Log 4‑way handshake, post‑process DUML protocol | 📅 |
+| **4 — ML Classification** | TinyML on 5 traffic layers for false‑positive reduction | 📅 |
+| **5 — Protocol Detection** | MAVLink / CRSF / ELRS signature recognition (beyond Wi‑Fi) | 📅 |
 
 ---
 
 ## References
 
-- **Original paper:** Meet Patel, Tejas Patil, Jatin Solanki, Hrushikesh Vibhute — *ESP32-Based Passive Wi-Fi Drone Detection with Confidence-Weighted Fingerprinting*. IJRPR Vol 7(4), Apr 2026. [PDF](https://ijrpr.com/uploads/V7ISSUE4/IJRPR62362.pdf)
-- **Welford, B.P.** (1962) *Note on a Method for Calculating Corrected Sums of Squares and Products.* Technometrics 4(3), 419‑420.
+- **Original paper:** Meet Patel, Tejas Patil, Jatin Solanki, Hrushikesh Vibhute — *ESP32-Based Passive Wi‑Fi Drone Detection with Confidence‑Weighted Fingerprinting*. IJRPR Vol 7(4), Apr 2026. [PDF](https://ijrpr.com/uploads/V7ISSUE4/IJRPR62362.pdf)
+- **Welford, B.P.** (1962). *Note on a Method for Calculating Corrected Sums of Squares and Products.* Technometrics 4(3), 419‑420.
 - **IEEE 802.11‑2020** — IEEE Standard for Information Technology.
 
 ---
