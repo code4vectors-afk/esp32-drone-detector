@@ -11,12 +11,12 @@
     },
     {
       "type": "heading",
-      "text": "What We Can Pick Up, Exploit, and Package",
+      "text": "What We Can Detect, Exploit, and Package",
       "level": 2
     },
     {
       "type": "paragraph",
-      "text": "<b>Source research:</b> Christof (2021) DJI Wi-Fi Protocol RE thesis · Behind the Wings (2023) DJI Enhanced Wi-Fi hijacking · OcuSync DroneID analysis (2026) · Detecting Drones via Encrypted Traffic Analysis (2019) · Drone Profiling through Wireless Fingerprinting (2018)"
+      "text": "Sources: Christof 2021 (DJI Wi-Fi RE thesis) · Behind the Wings 2023 (DJI hijacking) · OcuSync DroneID 2026 · Detecting Drones via Encrypted Traffic Analysis 2019 · Drone Profiling 2018"
     },
     {
       "type": "paragraph",
@@ -24,23 +24,19 @@
     },
     {
       "type": "heading",
-      "text": "The Problem with the Current Paper",
+      "text": "The Paper's Gaps",
       "level": 1
-    },
-    {
-      "type": "paragraph",
-      "text": "The IJRPR paper's 4-factor model (OUI + packet rate + RSSI variance + SSID) works for basic detection but leaves massive gaps:"
     },
     {
       "type": "table",
       "header": true,
       "rows": [
-        ["Gap", "Risk", "Impact"],
-        ["OUI-only vendor ID", "MAC randomization", "Drone with random MAC = 40 points lost"],
-        ["No traffic pattern analysis", "Encrypted traffic indistinguishable from any high-bandwidth client", "High false-positive rate in urban environments"],
-        ["2.4 GHz only", "5 GHz drones invisible", "Misses newer DJI Air/Mavic on 5.8 GHz"],
-        ["Single node", "No direction finding", "Cannot distinguish drone 50m away from drone 200m away"],
-        ["No protocol-level analysis", "Cannot differentiate drone type or flight mode", "No threat discrimination"]
+        ["Gap", "Risk"],
+        ["OUI-only vendor ID", "MAC randomization bypasses 40-point weight"],
+        ["No traffic pattern analysis", "Encrypted Wi-Fi looks like any high-bandwidth client"],
+        ["2.4 GHz only", "Misses 5 GHz and OcuSync drones entirely"],
+        ["Single node", "No direction finding or range discrimination"],
+        ["No protocol analysis", "Cannot differentiate drone model or flight mode"]
       ]
     },
     {
@@ -49,80 +45,24 @@
     },
     {
       "type": "heading",
-      "text": "Layer 1 — What the ESP32 Picks Up Today (No Changes Needed)",
+      "text": "Layer 1 — 802.11 MAC Layer (ESP32 Today)",
       "level": 1
     },
     {
       "type": "paragraph",
-      "text": "These signals are available from promiscuous 802.11 frame headers alone. No decryption needed. No firmware change required for the basic capture — just smarter processing."
+      "text": "Visible from promiscuous frame headers. Zero decryption needed."
     },
     {
       "type": "table",
       "header": true,
       "rows": [
-        ["Signal", "Visible In", "What It Tells You"],
-        ["Source MAC", "Every frame", "Device identity (can be randomized)"],
-        ["RSSI", "rx_ctrl struct", "Range estimate, variance tracking"],
-        ["Frame type", "Frame Control field", "Management vs data vs control"],
-        ["Packet size", "Raw frame length", "Biometric: small commands vs large video"],
-        ["Direction", "SA vs DA", "Who is sending — drone or controller"],
-        ["Channel", "Set by firmware", "Which 2.4 GHz channel is active"],
-        ["Beacon SSID", "Beacon frame body", "Drone AP name (if not hidden)"]
-      ]
-    },
-    {
-      "type": "heading",
-      "text": "Layer 2 — Traffic Statistics (Encrypted but Classifiable)",
-      "level": 1
-    },
-    {
-      "type": "paragraph",
-      "text": "These signals survive WPA2 encryption. Multiple academic papers demonstrate 90%+ detection accuracy from these features alone, using as few as 170 packets (820ms of traffic)."
-    },
-    {
-      "type": "table",
-      "header": true,
-      "rows": [
-        ["Feature", "Drone Signature", "Detectability"],
-        ["Packet size distribution", "Bi-modal: 56B controller → 1472B drone", "Trivial — size histogram per MAC"],
-        ["Traffic direction ratio", "Drone transmits 10-50× more than controller", "Byte counter per direction"],
-        ["Video frame cadence", "~33ms intervals (29.4 fps H.264)", "Timing histogram of drone→controller pkts"],
-        ["Burst structure", "4-6 MTU frames back-to-back then pause", "Consecutive MTU-size frame counter"],
-        ["Flow continuity", "No idle gaps >200ms in active sessions", "Max inter-packet gap per device"],
-        ["Channel utilization", "40-80% duty cycle on single channel", "Time between frames on channel"]
-      ]
-    },
-    {
-      "type": "paragraph",
-      "text": "<b>Key insight:</b> A smartphone streaming video to YouTube also sends large packets, but it sends both ways (ACKs, control). A drone link is almost entirely one-directional from drone to controller. This asymmetry alone is a powerful classifier."
-    },
-    {
-      "type": "paragraph",
-      "text": " "
-    },
-    {
-      "type": "heading",
-      "text": "Layer 3 — Decrypted DUML Protocol (Post-WPA2 Key)",
-      "level": 1
-    },
-    {
-      "type": "paragraph",
-      "text": "<b>Critical finding from Christof (2021):</b> DJI's Wi-Fi protocol has <b>no application-layer encryption.</b> The DUML payload is plaintext once WPA2 is decrypted. This means:"
-    },
-    {
-      "type": "table",
-      "header": true,
-      "rows": [
-        ["Protocol Element", "Offset", "What We Can Extract"],
-        ["Content type byte", "Wi-Fi Hdr +0x06", "Classifies every packet as command vs video vs camera"],
-        ["0x55 delimiter", "DUML Hdr +0x00", "Firm identifier of DJI drone traffic at payload level"],
-        ["Command-set + command", "DUML Hdr +0x09/+0x0A", "Identifies exact operation (fly/camera/battery/etc.)"],
-        ["Telemetry data", "DUML Body, Cmd 0x43/Set 0x03", "Latitude, longitude, height, velocity, pitch/roll/yaw, flight status"],
-        ["Battery data", "DUML Body, Cmd 0x03/Set 0x0D", "Cell voltage, estimated remaining power"],
-        ["Session ID", "Wi-Fi Hdr +0x02", "Tracks all packets in one flight session"],
-        ["Packet counter", "Wi-Fi Hdr +0x24", "Sequential ordering — detect packet loss or injection"],
-        ["CRC-16 Kermit", "DUML Trailer", "Non-standard CRC — verifiable protocol signature"],
-        ["Video stream", "UDP payload, content type 0x02", "H.264, 1280×720, ~30fps — extractable via FFmpeg"]
+        ["Signal", "What It Tells You"],
+        ["Source MAC", "Device identity (can be randomized)"],
+        ["RSSI", "Range estimate, variance for stability scoring"],
+        ["Frame type", "Management vs data vs control"],
+        ["Packet size", "Biometric: small stick commands vs large video frames"],
+        ["Direction (SA vs DA)", "Identifies drone vs controller"],
+        ["Beacon SSID", "Drone AP name, if not hidden"]
       ]
     },
     {
@@ -131,93 +71,29 @@
     },
     {
       "type": "heading",
-      "text": "What We Can Exploit — Asymmetric Advantages",
+      "text": "Layer 2 — Encrypted Traffic Statistics",
       "level": 1
     },
     {
       "type": "paragraph",
-      "text": "These are the angles where the defender has inherent advantage over the drone operator:"
-    },
-    {
-      "type": "paragraph",
-      "text": "<b>1. The drone cannot stop transmitting.</b>"
-    },
-    {
-      "type": "paragraph",
-      "text": "A drone in flight requires continuous bidirectional communication. It cannot go silent without initiating return-to-home or landing. This means the detection target is always emitting — no windowing, no intermittent operation."
-    },
-    {
-      "type": "paragraph",
-      "text": "<b>2. The video stream is a forcing function.</b>"
-    },
-    {
-      "type": "paragraph",
-      "text": "To stream 1080p video at 30fps, the drone must send ~4 Mbps of H.264 data. This requires MTU-sized frames (~1472 bytes) at a sustained rate. No consumer IoT device has this traffic profile. A phone streaming video comes close, but phones have bidirectional ACK traffic — drones don't."
-    },
-    {
-      "type": "paragraph",
-      "text": "<b>3. The protocol structure is deterministic.</b>"
-    },
-    {
-      "type": "paragraph",
-      "text": "The DJI DUML protocol has fixed delimiters (0x55), known CRC algorithms (CRC-16 Kermit), and fixed field positions. Even without decryption, a 0x55 search at expected offsets within encrypted packets provides a statistical signature for DJI drone traffic."
-    },
-    {
-      "type": "paragraph",
-      "text": "<b>4. The hardware is cheap.</b>"
-    },
-    {
-      "type": "paragraph",
-      "text": "An ESP32 costs $5. It can already capture all the data needed for Layers 1 and 2 analysis. Adding Layer 3 analysis requires only capturing the WPA2 handshake (same $5 hardware, software addition). This is 1,000× cheaper than commercial C-UAS sensors."
-    },
-    {
-      "type": "paragraph",
-      "text": "<b>5. The attacker cannot spoof the traffic profile.</b>"
-    },
-    {
-      "type": "paragraph",
-      "text": "To evade traffic-pattern detection, a drone would need to mimic a different device class — changing packet sizes, timing, and directionality. This would require modifying the drone's firmware. Consumer drones don't allow this. Only custom-built FPV drones could attempt it."
-    },
-    {
-      "type": "paragraph",
-      "text": " "
-    },
-    {
-      "type": "heading",
-      "text": "What We Can Package — Detection Layers",
-      "level": 1
-    },
-    {
-      "type": "paragraph",
-      "text": "Proposed five-layer detection model, building on the paper's 4-factor approach:"
+      "text": "Survive WPA2 encryption. 90%+ accuracy from ~170 packets (820ms of traffic)."
     },
     {
       "type": "table",
       "header": true,
       "rows": [
-        ["Layer", "What It Detects", "Hardware", "Conf. Weight"],
-        ["1 — MAC OUI + SSID", "Known drone vendor prefixes + drone AP names", "ESP32", "20 pts"],
-        ["2 — Traffic Direction Ratio", "Drone sends 10-50× more than it receives", "ESP32", "25 pts"],
-        ["3 — Packet Size Distribution", "Bi-modal 56B / 1472B signature", "ESP32", "25 pts"],
-        ["4 — Video Frame Cadence", "~33ms timing intervals in drone→controller flow", "ESP32", "20 pts"],
-        ["5 — DUML Protocol Signature (post-WPA2)", "0x55 delimiter + CRC-16 Kermit at known offsets", "ESP32 + key capture", "10 pts"]
+        ["Feature", "Drone Signature"],
+        ["Packet size distribution", "Bi-modal: 56B controller to 1472B drone"],
+        ["Traffic direction ratio", "Drone sends 10-50x more than controller"],
+        ["Video frame cadence", "~33ms intervals (29.4 fps H.264 video)"],
+        ["Burst structure", "4-6 MTU frames back-to-back, then pause"],
+        ["Flow continuity", "No idle gaps over 200ms in active session"],
+        ["Channel utilization", "40-80% duty cycle on single channel"]
       ]
     },
     {
       "type": "paragraph",
-      "text": "<b>Proposed weight redistribution vs the original paper:</b>"
-    },
-    {
-      "type": "paragraph",
-      "text": "Original: OUI(40) + Rate(30) + Var(20) + SSID(10) = 100"
-    },
-    {
-      "type": "paragraph",
-      "text": "<b>Proposed: DirRatio(25) + PktSize(25) + OUI(20) + Timing(20) + Var(5) + SSID(5) = 100</b>"
-    },
-    {
-      "type": "paragraph",
-      "text": "This reduces reliance on MAC OUI (which can be randomized) and elevates traffic-pattern features (which cannot be spoofed without firmware modification)."
+      "text": "Key insight: A smartphone streaming video sends ACKs both ways. A drone link is nearly one-directional. That asymmetry alone is a powerful classifier."
     },
     {
       "type": "paragraph",
@@ -225,16 +101,107 @@
     },
     {
       "type": "heading",
-      "text": "FPV & Homebrew Drones — Where the ESP32 Goes Blind",
+      "text": "Layer 3 — Decrypted DJI DUML Protocol",
       "level": 1
     },
     {
       "type": "paragraph",
-      "text": "The analysis above applies primarily to <b>consumer Wi-Fi drones</b> (DJI in Wi-Fi mode, Parrot, Autel, MAVLink-based drones with Wi-Fi telemetry). FPV and homebrew drones use completely different RF — and the ESP32 cannot see them."
+      "text": "Christof 2021: No application-layer encryption on top of WPA2. DUML payload is plaintext post-decrypt."
+    },
+    {
+      "type": "table",
+      "header": true,
+      "rows": [
+        ["Element", "Extractable Data"],
+        ["Content type byte at +0x06", "Classifies every packet: command/video/camera"],
+        ["0x55 delimiter at DUML Hdr", "Firm DJI identifier at payload level"],
+        ["Cmd-set + cmd", "Identifies operation: fly, camera, battery, OSD"],
+        ["Telemetry (Cmd 0x43/Set 0x03)", "Lat, lon, height, velocity, pitch/roll/yaw, flight status"],
+        ["Battery (Cmd 0x03/Set 0x0D)", "Cell voltage, estimated remaining power"],
+        ["Session ID", "Tracks all packets in one flight session"],
+        ["Packet counter", "Sequential ordering, detects packet loss or injection"],
+        ["CRC-16 Kermit", "Non-standard CRC — protocol signature"],
+        ["Video stream (type 0x02)", "H.264 1280x720 ~30fps, extractable via FFmpeg"]
+      ]
+    },
+    {
+      "type": "paragraph",
+      "text": " "
     },
     {
       "type": "heading",
-      "text": "FPV Drones — Invisible to ESP32",
+      "text": "Asymmetric Advantages",
+      "level": 1
+    },
+    {
+      "type": "paragraph",
+      "text": "1. The drone cannot stop transmitting. A drone in flight requires continuous bidirectional comms. It cannot go silent without landing. The target is always emitting."
+    },
+    {
+      "type": "paragraph",
+      "text": "2. Video streaming is a forcing function. 1080p at 30fps requires ~4 Mbps via MTU-size frames. No consumer IoT device matches this. Phones have bidirectional ACK traffic — drones don't."
+    },
+    {
+      "type": "paragraph",
+      "text": "3. The protocol is deterministic. DJI DUML has fixed 0x55 delimiters, known CRC-16 Kermit, fixed field positions. Even within encrypted packets, statistical marker searches yield signatures."
+    },
+    {
+      "type": "paragraph",
+      "text": "4. Hardware is 1000x cheaper. $5 ESP32 captures all Layer 1-2 data. WPA2 handshake capture is a software addition. Commercial C-UAS starts at $2,000."
+    },
+    {
+      "type": "paragraph",
+      "text": "5. The attacker cannot spoof the profile. Changing packet sizes, timing, and directionality requires firmware modification. Consumer drones don't allow this. Only custom FPV builds could attempt it."
+    },
+    {
+      "type": "paragraph",
+      "text": " "
+    },
+    {
+      "type": "heading",
+      "text": "Proposed 5-Layer Detection Model",
+      "level": 1
+    },
+    {
+      "type": "paragraph",
+      "text": "Rebalanced weights reduce OUI (spoofable) and elevate traffic-pattern features (unspoofable without firmware changes)."
+    },
+    {
+      "type": "table",
+      "header": true,
+      "rows": [
+        ["Layer", "Weight", "Hardware"],
+        ["1. MAC OUI + SSID", "20 pts", "ESP32"],
+        ["2. Traffic Direction Ratio", "25 pts", "ESP32"],
+        ["3. Packet Size Distribution", "25 pts", "ESP32"],
+        ["4. Video Frame Cadence", "20 pts", "ESP32"],
+        ["5. DUML Protocol Signature", "10 pts", "ESP32 + key capture"]
+      ]
+    },
+    {
+      "type": "paragraph",
+      "text": "Original paper: OUI(40) + Rate(30) + Var(20) + SSID(10) = 100"
+    },
+    {
+      "type": "paragraph",
+      "text": "Proposed: DirRatio(25) + PktSize(25) + OUI(20) + Timing(20) + Var(5) + SSID(5) = 100"
+    },
+    {
+      "type": "paragraph",
+      "text": " "
+    },
+    {
+      "type": "heading",
+      "text": "FPV and Homebrew Drones — ESP32 Blind Spots",
+      "level": 1
+    },
+    {
+      "type": "paragraph",
+      "text": "Above analysis applies to Wi-Fi drones. FPV drones use completely different RF. The ESP32 cannot see them."
+    },
+    {
+      "type": "heading",
+      "text": "FPV Drone RF Profile",
       "level": 2
     },
     {
@@ -242,102 +209,59 @@
       "header": true,
       "rows": [
         ["Subsystem", "Protocol", "Frequency", "Detectable By"],
-        ["Control link", "ExpressLRS, Crossfire/CRSF, ELRS", "900 MHz or 2.4 GHz FHSS", "HackRF, BladeRF — not ESP32"],
-        ["Video link", "Analog NTSC/PAL", "5.8 GHz analog", "RTL-SDR + downconverter, or RF power detector"],
-        ["Video link", "Digital (DJI FPV, Walksnail Avatar, HDZero)", "5.8 GHz OFDM", "SDR + protocol-specific decoder"],
-        ["Telemetry (optional)", "MAVLink over serial (not Wi-Fi)", "915/868 MHz (SiK radio)", "RTL-SDR (narrowband FM)"],
-        ["R/C link", "PWM/PPM/SBUS over serial", "Sub-GHz proprietary", "Not easily detectable"]
+        ["Control", "ELRS, Crossfire, CRSF", "900 MHz or 2.4 GHz FHSS", "HackRF, BladeRF — not ESP32"],
+        ["Video", "Analog NTSC/PAL", "5.8 GHz", "RTL-SDR + downconverter"],
+        ["Video", "Digital (Walksnail, HDZero)", "5.8 GHz OFDM", "SDR + protocol decoder"],
+        ["Telemetry", "MAVLink over serial", "915/868 MHz SiK", "RTL-SDR narrowband FM"],
+        ["R/C", "PWM/PPM/SBUS", "Sub-GHz proprietary", "Not easily detectable"]
       ]
     },
     {
       "type": "paragraph",
-      "text": "<b>The critical point:</b> An FPV drone emits NO 802.11 frames. The ESP32 sniffer is completely blind to it. The video link on 5.8 GHz is the only reliable passive detection vector — and it requires different hardware."
-    },
-    {
-      "type": "paragraph",
-      "text": "<b>However:</b> FPV drones still have a video link that must transmit continuously while flying. That 5.8 GHz signal has its own distinctive traits — OFDM preamble signatures for digital links, NTSC sync pulses for analog. These are detectable with a HackRF or even a simple RF power detector tuned to 5.8 GHz."
+      "text": "Critical: An FPV drone emits NO 802.11 frames. The 5.8 GHz video link is the only passive detection vector and it requires different hardware."
     },
     {
       "type": "heading",
-      "text": "Homebrew Drones — Paradoxically MORE Detectable When on Wi-Fi",
+      "text": "Homebrew on Wi-Fi — More Detectable",
       "level": 2
-    },
-    {
-      "type": "paragraph",
-      "text": "A homebrew drone with a Raspberry Pi or ESP32 companion computer running MAVLink over Wi-Fi is actually <b>easier to identify</b> than a DJI drone:"
     },
     {
       "type": "table",
       "header": true,
       "rows": [
-        ["Trait", "MAVLink Drone (Wi-Fi)", "DJI Drone (Wi-Fi Mode)"],
+        ["Trait", "MAVLink Drone (Wi-Fi)", "DJI Drone (Wi-Fi)"],
         ["Protocol", "Open-source, documented", "Proprietary, reverse-engineered"],
-        ["Transport", "MAVLink over UDP", "DUML over UDP"],
-        ["Heartbeat", "1Hz, always-on, fixed msg ID #0", "No heartbeat packet — continuous telemetry stream"],
-        ["Message IDs", "Known (GPS=33, ATTITUDE=30, BATTERY=147, etc.)", "Known (telemetry=0x43/0x03, battery=0x03/0x0D)"],
-        ["Packet sizes", "Variable, per message type", "Fixed clusters per content type"],
-        ["Encryption", "None (MAVLink is plaintext by design)", "WPA2 + no app-layer encryption"],
-        ["Detection ease", "Trivial — any Wi-Fi sniffer can decode", "Requires WPA2 key capture or statistical analysis"]
+        ["Heartbeat", "1Hz always-on, msg ID 0", "No heartbeat — continuous telemetry"],
+        ["Message IDs", "Known: GPS=33, ATT=30, BATT=147", "Known: telemetry 0x43/0x03"],
+        ["Encryption", "None — plaintext by design", "WPA2, no app-layer encryption"],
+        ["Detection ease", "Trivial — any sniffer decodes it", "Requires key capture or statistics"]
       ]
     },
     {
       "type": "paragraph",
-      "text": "<b>Key insight:</b> MAVLink's 1Hz heartbeat is the most reliable drone signature in existence. Every MAVLink drone broadcasts its system ID, component ID, and flight mode every second — in plaintext, over UDP. Any Wi-Fi sniffer within range can identify a MAVLink drone with 100% certainty from a single packet."
-    },
-    {
-      "type": "paragraph",
-      "text": " "
+      "text": "Key insight: MAVLink's 1Hz heartbeat is the most reliable drone signature. Every MAVLink drone broadcasts system ID, component ID, and flight mode in plaintext every second. Any Wi-Fi sniffer can identify it with 100% certainty from a single packet."
     },
     {
       "type": "heading",
-      "text": "Drones Without Remote ID — The Real Detection Challenge",
-      "level": 2
-    },
-    {
-      "type": "paragraph",
-      "text": "Remote ID (FAA Part 89 / ASTM F3411) broadcasts identification over Wi-Fi or BLE. Drones that don't broadcast Remote ID fall into these categories:"
-    },
-    {
-      "type": "table",
-      "header": true,
-      "rows": [
-        ["Drone Type", "Remote ID?", "Detectable By ESP32?", "Primary Detection Vector"],
-        ["DJI Mini 3/4 (Wi-Fi)", "Yes (FAA-compliant)", "Yes — Remote ID broadcast + Wi-Fi AP", "ESP32 + 5.8 GHz Rx for OcuSync path"],
-        ["DJI Mavic 3 (OcuSync)", "Yes (embedded in OcuSync)", "Not via Wi-Fi — DroneID in SDR signal", "HackRF (DroneID decodable per luyii-code-1 2026)"],
-        ["Older DJI (Phantom 4, Spark)", "No (pre-RID firmware)", "Yes — Wi-Fi AP is active", "ESP32 (traffic pattern analysis)"],
-        ["FPV homebrew (ELRS + analog)", "No (unless module added)", "No — no Wi-Fi at all", "5.8 GHz RF power detector + SDR"],
-        ["Homebrew + Pi (MAVLink)", "Optional (can add RID module)", "Yes — MAVLink UDP stream", "ESP32 (MAVLink heartbeat is 100% ID)"],
-        ["Custom built with FCC module", "Depends on firmware", "Maybe — depends on telemetry radio", "Multi-modal"]
-      ]
-    },
-    {
-      "type": "paragraph",
-      "text": "<b>The hardest detection problem:</b> An FPV drone on ELRS (900 MHz FHSS) with analog video (5.8 GHz NTSC). No Wi-Fi, no BLE, no Remote ID. Detection requires a 5.8 GHz RF energy detector (cheap, but gives only presence, not classification) or an SDR with FHSS tracking capability (expensive, high compute). This is the gap that a $5 ESP32 cannot fill."
-    },
-    {
-      "type": "paragraph",
-      "text": " "
-    },
-    {
-      "type": "heading",
-      "text": "Multi-Modal Detection Strategy — Covering All Drone Types",
+      "text": "Drones Without Remote ID",
       "level": 2
     },
     {
       "type": "table",
       "header": true,
       "rows": [
-        ["Sensor", "Detects", "Cost", "Coverage Gap"],
-        ["ESP32 (Wi-Fi promiscuous)", "Consumer Wi-Fi drones, MAVLink drones, Remote ID broadcasts", "$5", "FPV drones, OcuSync-only drones, 5 GHz drones"],
-        ["HackRF / RTL-SDR (2.4 GHz)", "OcuSync DroneID, FHSS control links", "$30-300", "5.8 GHz video links, requires DSP expertise"],
-        ["5.8 GHz RF power detector", "Analog/digital FPV video (always-on)", "$10-50", "No classification — presence only"],
-        ["USB SDR + 5.8 GHz downconverter", "Digital FPV video signatures (OFDM)", "$50-100", "Requires protocol-specific decoder"],
-        ["ESP32 + SDR combined node", "Wi-Fi drones + FHSS + 5.8 GHz energy", "$50-100", "Full spectrum coverage in single node"]
+        ["Drone Type", "Remote ID?", "ESP32 Detection", "Primary Vector"],
+        ["DJI Mini 3/4 (Wi-Fi)", "Yes", "Yes", "ESP32 + 5.8 GHz Rx"],
+        ["DJI Mavic 3 (OcuSync)", "Yes (in OcuSync)", "No", "HackRF — DroneID in SDR"],
+        ["Older DJI (Phantom 4, Spark)", "No (pre-RID)", "Yes", "ESP32 traffic analysis"],
+        ["FPV homebrew (ELRS + analog)", "No", "No", "5.8 GHz RF detector + SDR"],
+        ["Homebrew + Pi (MAVLink)", "Optional", "Yes", "ESP32 — heartbeat is 100% ID"],
+        ["Custom FCC module", "Depends", "Maybe", "Multi-modal"]
       ]
     },
     {
       "type": "paragraph",
-      "text": "<b>Recommended minimum viable stack for broad coverage:</b> One ESP32 (for Wi-Fi drones, MAVLink, Remote ID) + one $10 RTL-SDR dongle with a 5.8 GHz antenna (for FPV video presence detection) + one HackRF (for OcuSync DroneID decode). Total BOM: ~$50-150 per node."
+      "text": "Hardest problem: FPV drone on ELRS (900 MHz FHSS) with analog 5.8 GHz video. No Wi-Fi, no BLE, no RID. Detection requires 5.8 GHz RF energy (presence only) or SDR with FHSS tracking."
     },
     {
       "type": "paragraph",
@@ -345,19 +269,43 @@
     },
     {
       "type": "heading",
-      "text": "Implementation Path",
+      "text": "Multi-Modal Detection Strategy",
       "level": 1
     },
     {
       "type": "table",
       "header": true,
       "rows": [
-        ["Phase", "What We Build", "Timeline"],
-        ["Phase 1: Traffic Stats", "Add per-MAC packet size histogram + direction ratio to ESP32 firmware. Weight 50% of confidence score.", "Week 1"],
-        ["Phase 2: Timing Analysis", "Add inter-packet timing histogram. Detect 30fps cadence. Weight 20% of score.", "Week 2"],
-        ["Phase 3: WPA2 Key Capture", "Log 4-way handshake from promiscuous frames. Store PMKID for offline decrypt.", "Week 2-3"],
-        ["Phase 4: DUML Parser", "Post-process captured PCAPs. Extract telemetry + video from decrypted flows.", "Week 3-4"],
-        ["Phase 5: Real-time ML", "TinyML classifier on ESP32 using traffic features. 5-layer model in firmware.", "Month 2"]
+        ["Sensor", "Detects", "Cost", "Gap"],
+        ["ESP32", "Wi-Fi drones, MAVLink, Remote ID", "$5", "Blind to FPV, OcuSync, 5 GHz"],
+        ["HackRF / RTL-SDR (2.4 GHz)", "OcuSync DroneID, FHSS control", "$30-300", "Blind to 5.8 GHz video"],
+        ["5.8 GHz RF detector", "FPV video (always-on)", "$10-50", "Presence only, no classification"],
+        ["ESP32 + SDR combo", "Wi-Fi + FHSS + 5.8 GHz energy", "$50-100", "Full spectrum, single node"]
+      ]
+    },
+    {
+      "type": "paragraph",
+      "text": "Minimum viable stack: one ESP32 + one $10 RTL-SDR with 5.8 GHz antenna + one HackRF. Total BOM: ~$50-150 per node."
+    },
+    {
+      "type": "paragraph",
+      "text": " "
+    },
+    {
+      "type": "heading",
+      "text": "Implementation Roadmap",
+      "level": 1
+    },
+    {
+      "type": "table",
+      "header": true,
+      "rows": [
+        ["Phase", "What We Build", "Time"],
+        ["1. Traffic Stats", "Packet size histogram + direction ratio. 50% weight.", "Week 1"],
+        ["2. Timing Analysis", "Inter-packet timing, 30fps cadence. 20% weight.", "Week 2"],
+        ["3. WPA2 Key Capture", "Log 4-way handshake from promiscuous frames.", "Week 2-3"],
+        ["4. DUML Parser", "Post-process PCAPs, extract telemetry and video.", "Week 3-4"],
+        ["5. Real-time ML", "TinyML classifier using all 5 traffic layers.", "Month 2"]
       ]
     },
     {
@@ -371,23 +319,23 @@
     },
     {
       "type": "paragraph",
-      "text": "1. Christof, T. (2021). <i>DJI Wi-Fi Protocol Reverse Engineering.</i> JKU Linz Master's Thesis. Full 4-layer protocol architecture, packet structure, encryption analysis. [digidow.eu]"
+      "text": "1. Christof, T. (2021). DJI Wi-Fi Protocol Reverse Engineering. JKU Linz. Four-layer protocol architecture, packet structure, encryption analysis."
     },
     {
       "type": "paragraph",
-      "text": "2. al. (2023). <i>Behind The Wings: Reverse Engineering and Hijacking DJI Enhanced Wi-Fi Protocol.</i> arXiv:2309.05913. Open-source hijacking PoC at github.com/ibndias/dji-drone-hijacking."
+      "text": "2. Behind the Wings (2023). Reverse Engineering DJI Enhanced Wi-Fi Protocol. arXiv:2309.05913. PoC at github.com/ibndias/dji-drone-hijacking."
     },
     {
       "type": "paragraph",
-      "text": "3. Sciancalepore et al. (2019). <i>Detecting Drones Status via Encrypted Traffic Analysis.</i> ACM WiSec. Demonstrates drone classification from encrypted packet features."
+      "text": "3. Sciancalepore et al. (2019). Detecting Drones Status via Encrypted Traffic Analysis. ACM WiSec."
     },
     {
       "type": "paragraph",
-      "text": "4. Bisio et al. (2018). <i>Unauthorized Amateur UAV Detection Based on WiFi Statistical Fingerprint Analysis.</i> IEEE. 90%+ detection accuracy from traffic statistics."
+      "text": "4. Bisio et al. (2018). Unauthorized Amateur UAV Detection Based on WiFi Statistical Fingerprint Analysis. IEEE."
     },
     {
       "type": "paragraph",
-      "text": "5. luyii-code-1 (2026). <i>DJI OcuSync DroneID Research.</i> github.com/luyii-code-1/dji-ocusync-droneid-research. O2/O4 DroneID PHY/packet/crypto analysis."
+      "text": "5. luyii-code-1 (2026). DJI OcuSync DroneID Research. github.com/luyii-code-1/dji-ocusync-droneid-research."
     }
   ]
 }
