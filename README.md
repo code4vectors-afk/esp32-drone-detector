@@ -12,6 +12,7 @@
   <a href="#how-it-works">How It Works</a> •
   <a href="#confidence-scoring">Confidence Model</a> •
   <a href="#fusion-architecture">Fusion Design</a> •
+  <a href="#alerting--getting-detections-to-a-phone">Alerting</a> •
   <a href="#roadmap">Roadmap</a>
 </p>
 
@@ -305,16 +306,58 @@ The node software is licensed with a defined collection scope, and binaries are 
 
 ---
 
+## Alerting — Getting Detections to a Phone
+
+> Full setup guide: [`docs/ALERTING.md`](docs/ALERTING.md) · Dispatcher: [`scripts/alert.py`](scripts/alert.py)
+
+**Carrier email-to-SMS gateways are dead or dying.** T-Mobile (`@tmomail.net`) retired ~Dec 2024 and AT&T (`@txt.att.net`) shut down ~Jun 2025 — both fail *silently*, so an alert system built on them looks healthy while delivering nothing. Verizon (`@vtext.com`) still works but retires 31 Mar 2027.
+
+**Use a push service for the primary channel and a paid SMS API for redundancy.**
+
+| Channel | Cost | Escalates until ack? |
+|---------|------|---------------------|
+| **ntfy** | Free, self-hostable | No |
+| **Pushover** | $5 one-time | ✅ **Priority 2 repeats every 60s until acknowledged** |
+| **Twilio SMS** | ~$0.008/msg | No |
+| Carrier gateway | Free | ❌ Largely dead — see above |
+
+**Why this matters:** an SMS is a *notification*. It arrives, it makes a sound, and it stops. Pushover priority 2 **bypasses Do Not Disturb and re-alerts until someone acknowledges.** For "wake me up because a drone is inbound," that is the difference between an alert and a notification. SMS stays as the redundant path because it travels a different network than an IP push.
+
+### Severity maps to the fusion matrix
+
+| Fusion cell | Severity |
+|-------------|----------|
+| RID + traffic (confirmed cooperative) | `info` — log it, do not wake anyone |
+| RID only, no traffic | **none** — range asymmetry means this is usually *distant*, not suspicious |
+| **No RID + traffic** (non-cooperative) | **`critical`** |
+| Node offline / adapter failure | `alert` |
+
+```bash
+# The threat case
+./scripts/alert.py --severity critical \
+  --title "Non-cooperative drone" \
+  --message "CONF 92% | MAC A4:12:6D:xx | ch 6 | -58 dBm"
+```
+
+Rate limiting suppresses repeat alerts on the same key, but **severity escalation always breaks through** — a contact going from suspicious to confirmed must not be swallowed by a cooldown.
+
+**Verified working:** ntfy delivery end-to-end (HTTP 200, message read back), all four rate-limiter behaviours, exit codes, dry-run. **Untested:** Twilio, Pushover, email — implemented but no credentials configured yet.
+
+---
+
 ## Project Structure
 
 ```
 esp32-drone-detector/
 ├── firmware/
 │   └── esp32-drone-detector.ino    ← The code. Flash this to your ESP32.
+├── scripts/
+│   └── alert.py                    ← Multi-channel alert dispatcher (ntfy/SMS/push)
 ├── docs/
 │   ├── SPEC.md                     ← Reverse‑engineered architecture spec
 │   ├── TECHNICAL_BRIEF.md          ← Full team engineering briefing
 │   ├── FUSION_DESIGN.md            ← ⚠️ WIP: fusion design, findings, open questions
+│   ├── ALERTING.md                 ← Alert channels, carrier gateway status, setup
 │   ├── ESP32_Drone_Detector_Executive_Summary.pdf ← 3‑page exec overview
 │   └── Drone_Traffic_Fingerprinting_Deep_Analysis.pdf ← 6‑page deep analysis
 ├── assets/
