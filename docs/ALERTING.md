@@ -31,13 +31,14 @@ The dispatcher still supports it (`ALERT_GATEWAY_ADDRESS`) as a last-resort extr
 
 ## 3. Channel Comparison
 
-| Channel | Cost | Reliability | Ack / Escalation | Notes |
-|---------|------|-------------|------------------|-------|
-| **ntfy** | Free | High | No | Open source, self-hostable, iOS app. Best primary. |
-| **Pushover** | $5 one-time | High | ✅ **Priority 2 repeats until acknowledged** | The only option here that escalates. |
-| **Twilio SMS** | ~$0.0079/msg US + $1.15/mo number | High | No | Real SMS. Works with no data connection on the phone. |
-| **Carrier gateway** | Free | ❌ Low | No | See §2. Do not rely on it. |
-| **Email (himalaya)** | Free | High | No | Good audit trail, poor urgency. |
+| Channel | Cost | Reliability | Ack / Escalation | Needs internet? |
+|---------|------|-------------|------------------|-----------------|
+| **Aircard (modem)** | Free (uses your plan) | High, if SIM permits SMS | No | **❌ No** — carrier signalling channel |
+| **ntfy** | Free | High | No | Yes |
+| **Pushover** | $5 one-time | High | ✅ **Priority 2 repeats until acknowledged** | Yes |
+| **Twilio SMS** | ~$0.0079/msg US + $1.15/mo number | High | No | Yes (API call) |
+| **Carrier gateway** | Free | ❌ Low | No | Yes (email) |
+| **Email (himalaya)** | Free | High | No | Yes |
 
 ### Why push beats SMS for this use case
 
@@ -46,6 +47,88 @@ An SMS is a *notification*. It arrives, it makes a sound, and that is the end of
 **Pushover priority 2 is different: it bypasses Do Not Disturb and re-alerts every 60 seconds until someone taps Acknowledge.** For a system whose entire purpose is "wake me up because a drone is inbound," that is the difference between an alert and a notification.
 
 Keep SMS as the **redundant path** — it travels a different network than an IP push, so a push-service outage or an internet problem does not silence both.
+
+---
+
+## 3b. The Aircard Path — SMS Without a Third Party
+
+If you have a cellular modem (aircard) with an active SIM and a phone number, you can send SMS **directly**. No Twilio account, no API, no per-message cost.
+
+This may be the **best** option for this project, for one reason:
+
+> **It does not need the internet.**
+
+SMS travels the carrier's *signalling* channel, not the data channel. If the site's internet connection is cut — which is exactly what an adversary does before an incursion — every internet-dependent alert path goes silent at once. An aircard path keeps working as long as there is cell coverage.
+
+For perimeter and critical-infrastructure monitoring, that is the difference between an alert system and a false sense of security. It also means the aircard channel should sit on a **separate power and network path** from the rest of the node.
+
+### What you need
+
+1. A cellular modem that exposes an AT command interface (nearly all do)
+2. A SIM with a phone number
+3. **A plan that permits SMS** ← this is where most attempts die
+
+### The gotcha: data-only SIMs
+
+Many WWAN / aircard / IoT plans are provisioned **data-only**. The modem works, the SIM registers, data flows normally — and SMS returns `CMS ERROR`. In the worst case the modem reports "sent" while the carrier silently drops it.
+
+You cannot tell from the modem alone. Ask the carrier directly:
+
+> "Does this SIM's provisioning permit **MO-SMS** (mobile-originated SMS)?"
+
+### Linux setup (on the node)
+
+```bash
+sudo apt install modemmanager
+
+# Confirm the modem is visible
+mmcli -L
+
+# Send a message
+MODEM=$(mmcli -L | grep -o 'Modem/[0-9]*' | head -1 | cut -d/ -f2)
+mmcli -m "$MODEM" --messaging-create-sms="text='hello',number='+15551234567'"
+mmcli -s 0 --send
+```
+
+### Run the preflight first
+
+`scripts/modem-preflight.sh` walks every layer — tooling, modem detection, registration, SIM, SMSC, SMS capability — so a failure tells you *which* layer broke rather than just "SMS didn't work":
+
+```bash
+./scripts/modem-preflight.sh                      # diagnose only
+./scripts/modem-preflight.sh --send +15551111111  # diagnose + live test
+```
+
+### Common failure modes
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `No modems were found` | Card stuck in storage/CD-ROM mode | Needs `usb_modeswitch`, or try another USB port |
+| No AT response | Modem held by an active data connection | `sudo mmcli -m <idx> --simple-disconnect`, or use the dedicated AT port |
+| `CMS ERROR: 500` | SIM plan does not allow SMS | Call the carrier — this is provisioning, not hardware |
+| Reports "sent", nothing arrives | Carrier dropped it | Also provisioning |
+| No SMSC configured | Service centre number unset | `mmcli -m <idx> --command='AT+CSCA="+1XXXXXXXXXX",145'` |
+
+### Wiring it in
+
+```bash
+export ALERT_SMS_TO="+15551111111"
+./scripts/alert.py --severity critical \
+  --title "Non-cooperative drone" --message "CONF 92%" --channels modem
+```
+
+The dispatcher prefers `mmcli` when present and falls back to raw AT commands over a serial port (`ALERT_MODEM_DEVICE`, requires `pyserial`).
+
+### Recommended channel posture
+
+| Role | Channel | Why |
+|------|---------|-----|
+| Primary | **ntfy** | Free, instant, self-hostable, good UX |
+| Escalation | **Pushover** | Only channel that repeats until acknowledged |
+| **Out-of-band backup** | **Aircard SMS** | **Survives internet loss** — different network path entirely |
+| Audit trail | Email | Searchable record |
+
+Twilio becomes redundant if the aircard works — you already have a number that is not dependent on a third-party API.
 
 ---
 
@@ -194,6 +277,9 @@ ALERT_STATE_FILE=/tmp/t.json ./scripts/alert.py --severity critical \
 | Rate limiter — escalation breaks through | ✅ **Verified** |
 | Rate limiter — `--force` bypass | ✅ **Verified** |
 | Exit codes and dry-run behaviour | ✅ **Verified** |
+| `modem-preflight.sh` — bash syntax, clean failure with no modem present | ✅ **Verified** |
+| alert.py — compiles clean, modem channel dry-run | ✅ **Verified** |
+| Aircard SMS delivery | ⚠️ **Untested — no modem attached to this machine.** Run `modem-preflight.sh` on the node |
 | Twilio SMS delivery | ⚠️ Implemented, untested — no credentials |
 | Pushover emergency escalation | ⚠️ Implemented, untested — no credentials |
 | Email via himalaya | ⚠️ Implemented, untested |
@@ -224,8 +310,10 @@ subprocess.run([
 
 | # | Item | Notes |
 |---|------|-------|
-| A1 | Decide primary channel: ntfy only, or ntfy + Pushover | Pushover costs $5 but is the only escalating option |
-| A2 | Choose topic name and whether to self-host ntfy | Self-hosting suits the on-premises posture |
-| A3 | Provision Twilio number if SMS redundancy is required | ~$1.15/mo + usage |
-| A4 | Confirm mobile carrier | Determines whether the gateway fallback is viable at all |
-| A5 | Add node-health checks to the detector | Offline nodes currently alert on nothing |
+| A1 | **Does the aircard's SIM permit SMS?** | Run `modem-preflight.sh --send`. This is the highest-leverage unknown. |
+| A2 | Decide primary channel: ntfy only, or ntfy + Pushover | Pushover costs $5 but is the only escalating option |
+| A3 | Choose topic name and whether to self-host ntfy | Self-hosting suits the on-premises posture |
+| A4 | **Confirm aircard is on a separate power/network path** | The whole point is out-of-band. Sharing a switch defeats it. |
+| A5 | Provision Twilio number — only if the aircard fails | Redundant if the aircard works |
+| A6 | Add node-health checks to the detector | Offline nodes currently alert on nothing |
+| A7 | Decide whether SMS needs status-report tracking | `AT+CSMP` can request delivery confirmation; adds complexity |

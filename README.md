@@ -308,20 +308,38 @@ The node software is licensed with a defined collection scope, and binaries are 
 
 ## Alerting — Getting Detections to a Phone
 
-> Full setup guide: [`docs/ALERTING.md`](docs/ALERTING.md) · Dispatcher: [`scripts/alert.py`](scripts/alert.py)
+> Full setup guide: [`docs/ALERTING.md`](docs/ALERTING.md) · Dispatcher: [`scripts/alert.py`](scripts/alert.py) · Preflight: [`scripts/modem-preflight.sh`](scripts/modem-preflight.sh)
 
 **Carrier email-to-SMS gateways are dead or dying.** T-Mobile (`@tmomail.net`) retired ~Dec 2024 and AT&T (`@txt.att.net`) shut down ~Jun 2025 — both fail *silently*, so an alert system built on them looks healthy while delivering nothing. Verizon (`@vtext.com`) still works but retires 31 Mar 2027.
 
-**Use a push service for the primary channel and a paid SMS API for redundancy.**
+| Channel | Cost | Escalates until ack? | Needs internet? |
+|---------|------|---------------------|-----------------|
+| **Aircard SMS** | Free (your plan) | No | **❌ No — out-of-band** |
+| **ntfy** | Free, self-hostable | No | Yes |
+| **Pushover** | $5 one-time | ✅ **Repeats every 60s until acknowledged** | Yes |
+| **Twilio SMS** | ~$0.008/msg | No | Yes |
+| Carrier gateway | Free | ❌ Largely dead — see above | Yes |
 
-| Channel | Cost | Escalates until ack? |
-|---------|------|---------------------|
-| **ntfy** | Free, self-hostable | No |
-| **Pushover** | $5 one-time | ✅ **Priority 2 repeats every 60s until acknowledged** |
-| **Twilio SMS** | ~$0.008/msg | No |
-| Carrier gateway | Free | ❌ Largely dead — see above |
+**Why this matters:** an SMS is a *notification*. It arrives, it makes a sound, and it stops. Pushover priority 2 **bypasses Do Not Disturb and re-alerts until someone acknowledges.** For "wake me up because a drone is inbound," that is the difference between an alert and a notification.
 
-**Why this matters:** an SMS is a *notification*. It arrives, it makes a sound, and it stops. Pushover priority 2 **bypasses Do Not Disturb and re-alerts until someone acknowledges.** For "wake me up because a drone is inbound," that is the difference between an alert and a notification. SMS stays as the redundant path because it travels a different network than an IP push.
+### The aircard is the out-of-band path
+
+If you have a cellular modem with an active SIM and a phone number, you can send SMS **directly** — no Twilio, no API, no per-message cost. The reason it matters:
+
+> **SMS travels the carrier's signalling channel, not the data channel. It works when the internet does not.**
+
+An adversary cuts connectivity before an incursion. Every internet-dependent alert path goes silent at once. An aircard path keeps working wherever there is cell coverage — which is why it should sit on a **separate power and network path** from the rest of the node.
+
+**The catch: most WWAN/aircard/IoT SIMs are provisioned data-only.** The modem works, the SIM registers, data flows — and SMS returns `CMS ERROR`. You cannot tell from the modem. Run the preflight, then ask the carrier the specific question:
+
+> "Does this SIM's provisioning permit **MO-SMS** (mobile-originated SMS)?"
+
+```bash
+./scripts/modem-preflight.sh                      # diagnose every layer
+./scripts/modem-preflight.sh --send +15551111111  # diagnose + live test
+```
+
+The preflight checks tooling → modem detection → registration → SIM → SMSC → SMS capability, so a failure tells you *which* layer broke instead of just "SMS didn't work".
 
 ### Severity maps to the fusion matrix
 
@@ -352,7 +370,8 @@ esp32-drone-detector/
 ├── firmware/
 │   └── esp32-drone-detector.ino    ← The code. Flash this to your ESP32.
 ├── scripts/
-│   └── alert.py                    ← Multi-channel alert dispatcher (ntfy/SMS/push)
+│   ├── alert.py                    ← Multi-channel alert dispatcher
+│   └── modem-preflight.sh          ← Aircard SMS diagnostic
 ├── docs/
 │   ├── SPEC.md                     ← Reverse‑engineered architecture spec
 │   ├── TECHNICAL_BRIEF.md          ← Full team engineering briefing

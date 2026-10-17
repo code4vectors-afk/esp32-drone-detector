@@ -16,6 +16,9 @@ CHANNELS (all optional — enable by setting the relevant env vars)
   ntfy      Free, self-hostable push. Best primary channel.
   pushover  Paid (one-time $5). Supports priority-2 emergency: repeats
             every 60s until the alert is acknowledged. SMS cannot do this.
+  modem     SMS direct through an attached cellular modem (aircard).
+            No third party, no per-message cost, and does NOT need
+            internet — goes over the carrier signalling channel.
   twilio    Real SMS via API (~$0.0079/msg US).
   gateway   Legacy carrier email-to-SMS gateway. DEGRADED — see docs.
   email     Plain email via himalaya. Useful as a last-resort audit trail.
@@ -44,6 +47,9 @@ ENV VARS
   NTFY_SERVER                default https://ntfy.sh
   PUSHOVER_TOKEN             app token
   PUSHOVER_USER              user key
+  ALERT_MODEM_DEVICE         e.g. /dev/ttyUSB2 (raw AT fallback)
+  ALERT_MODEM_BAUD           default 115200
+  ALERT_MODEM_INDEX          mmcli modem index if more than one is present
   TWILIO_ACCOUNT_SID         ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
   TWILIO_AUTH_TOKEN
   TWILIO_FROM                +1XXXXXXXXXX (your Twilio number)
@@ -62,6 +68,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import time
@@ -258,6 +266,140 @@ def send_twilio(title: str, message: str, severity: str, dry: bool) -> bool:
         return False
 
 
+def send_modem(title: str, message: str, severity: str, dry: bool) -> bool:
+    """Send SMS directly through an attached cellular modem (aircard).
+
+    This is the no-third-party path: if the SIM permits SMS, the message goes
+    out over the carrier's signalling channel and does NOT touch the internet.
+    That matters operationally — an alert path that dies when the site's
+    internet is cut is not an alert path.
+
+    Two mechanisms, tried in order:
+      1. Linux/ModemManager via `mmcli` — preferred. Handles the modem state
+         machine and does not fight an active data connection.
+      2. Raw AT commands over a serial port (needs pyserial).
+
+    Requires ALERT_SMS_TO and either mmcli on PATH or ALERT_MODEM_DEVICE set.
+    """
+    if not SMS_ENABLED[severity]:
+        skipped(f"modem: SMS disabled for severity '{severity}' (cost control)")
+        return False
+
+    to = os.environ.get("ALERT_SMS_TO")
+    if not to:
+        skipped("modem: ALERT_SMS_TO not set")
+        return False
+
+    body = f"[{severity.upper()}] {title}: {message}"
+    if len(body) > 160:
+        body = body[:157] + "..."
+
+    if dry:
+        ok(f"modem: would SMS {to} via {'mmcli' if shutil.which('mmcli') else 'AT'} "
+           f"({len(body)} chars)")
+        return True
+
+    if shutil.which("mmcli"):
+        return _modem_mmcli(to, body)
+    if os.environ.get("ALERT_MODEM_DEVICE"):
+        return _modem_at(to, body)
+
+    skipped("modem: neither mmcli nor ALERT_MODEM_DEVICE available")
+    return False
+
+
+def _modem_mmcli(to: str, body: str) -> bool:
+    """Send via ModemManager. Primary paths are auto-detected."""
+    try:
+        # Discover the modem index
+        out = subprocess.run(["mmcli", "-L"], capture_output=True, timeout=TIMEOUT)
+        text = out.stdout.decode(errors="replace")
+        modems = re.findall(r"Modem/(\d+)", text)
+        if not modems:
+            fail("modem: mmcli found no modems")
+            return False
+        if len(modems) > 1 and not os.environ.get("ALERT_MODEM_INDEX"):
+            warn(f"modem: {len(modems)} modems present, using Modem/{modems[0]} "
+                 f"(set ALERT_MODEM_INDEX to override)")
+        idx = os.environ.get("ALERT_MODEM_INDEX") or modems[0]
+
+        # Create the SMS in modem storage
+        create = subprocess.run(
+            ["mmcli", "-m", idx, f"--messaging-create-sms=text='{body}',number='{to}'"],
+            capture_output=True, timeout=TIMEOUT,
+        )
+        if create.returncode != 0:
+            fail(f"modem: create failed: "
+                 f"{create.stderr.decode(errors='replace').strip()[:200]}")
+            return False
+        sms_ids = re.findall(r"/SMS/(\d+)", create.stdout.decode(errors="replace"))
+        if not sms_ids:
+            fail(f"modem: could not parse SMS id from: "
+                 f"{create.stdout.decode(errors='replace').strip()[:200]}")
+            return False
+        sms_id = sms_ids[-1]
+
+        # Send it
+        send = subprocess.run(
+            ["mmcli", "-s", sms_id, "--send"], capture_output=True, timeout=30,
+        )
+        if send.returncode != 0:
+            err = send.stderr.decode(errors="replace").strip()
+            fail(f"modem: send failed: {err[:200]}")
+            if "CMS ERROR" in err or "Unknown" in err:
+                warn("modem: this often means the SIM plan does not allow SMS "
+                     "(common on data-only/IoT SIMs) — confirm with the carrier")
+            return False
+        ok(f"modem: SMS queued via mmcli (SMS/{sms_id})")
+        return True
+    except subprocess.TimeoutExpired:
+        fail("modem: mmcli timed out")
+        return False
+    except FileNotFoundError:
+        fail("modem: mmcli not found")
+        return False
+
+
+def _modem_at(to: str, body: str) -> bool:
+    """Raw AT-command fallback. Requires pyserial."""
+    device = os.environ["ALERT_MODEM_DEVICE"]
+    baud = int(os.environ.get("ALERT_MODEM_BAUD", "115200"))
+    try:
+        import serial  # optional dependency
+    except ImportError:
+        fail("modem: pyserial not installed (pip install pyserial)")
+        return False
+    try:
+        with serial.Serial(device, baud, timeout=3) as ser:
+            def cmd(seq: bytes, expect: bytes) -> bool:
+                ser.reset_input_buffer()
+                ser.write(seq)
+                return expect in ser.read_until(expect, size=512)
+
+            if not cmd(b"AT\r", b"OK"):
+                fail(f"modem: no AT response on {device} "
+                     f"(modem may be held by an active data connection)")
+                return False
+            if not cmd(b"AT+CMGF=1\r", b"OK"):
+                fail("modem: AT+CMGF=1 (text mode) rejected")
+                return False
+            ser.write(f'AT+CMGS="{to}"\r'.encode())
+            if b">" not in ser.read_until(b">", size=256):
+                fail("modem: no prompt after AT+CMGS (SMS may be disallowed on this SIM)")
+                return False
+            # Message body, terminated by Ctrl-Z (0x1A)
+            ser.write(body.encode("ascii", "ignore") + b"\x1a")
+            resp = ser.read_until(b"OK", size=512)
+            if b"OK" in resp or b"+CMGS" in resp:
+                ok(f"modem: SMS sent via AT on {device}")
+                return True
+            fail(f"modem: AT send failed: {resp.decode(errors='replace').strip()[:160]}")
+            return False
+    except OSError as exc:
+        fail(f"modem: cannot open {device}: {exc}")
+        return False
+
+
 def send_gateway(title: str, message: str, severity: str, dry: bool) -> bool:
     """Legacy carrier email-to-SMS gateway. Largely discontinued — see docs."""
     addr = os.environ.get("ALERT_GATEWAY_ADDRESS")
@@ -308,6 +450,7 @@ def _send_email(to: str, subject: str, body: str, dry: bool, label: str) -> bool
 CHANNELS = {
     "ntfy": send_ntfy,
     "pushover": send_pushover,
+    "modem": send_modem,
     "twilio": send_twilio,
     "gateway": send_gateway,
     "email": send_email,
@@ -325,7 +468,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--title", required=True)
     ap.add_argument("--message", required=True)
     ap.add_argument("--key", help="rate-limit bucket key (default: the title)")
-    ap.add_argument("--channels", default="ntfy,pushover,twilio,gateway,email",
+    ap.add_argument("--channels", default="ntfy,pushover,modem,twilio,gateway,email",
                     help="comma-separated subset of channels to attempt")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--force", action="store_true",
