@@ -23,10 +23,11 @@ Confirmed against the live mailbox (`cemirsilva@gmail.com`) on 2026‑10‑11:
 | Alert sender | `alerts@droneaware.io` (display name "DroneAware Network") |
 | Detection subject | `DroneAware: DJI Mini 5 Pro detected by pev-01` |
 | Health subject | `Node offline — pev-01` **(no `DroneAware:` prefix)** |
+| Recovery subject | `Node back online — pev-01` **(also no prefix)** |
 | Volume observed | 23 alerts over 6 days (~4/day) |
 | Existing Gmail label | `DroneAware/Alerts` |
 
-⚠️ **The two subject formats matter.** A filter matching `subject:DroneAware` will silently miss every *"Node offline"* health warning. Match on the **sender** (`alerts@droneaware.io`) to catch both.
+⚠️ **There are at least THREE subject formats, and only one carries the `DroneAware:` prefix.** A filter matching `subject:DroneAware` would silently miss every node-health warning *and* every recovery notice. Match on the **sender** (`alerts@droneaware.io`) to catch all of them.
 
 ⚠️ **Biggest practical gotcha: the alerts are auto-archived.** All 23 were in `[Gmail]/All Mail` and **zero** were in the INBOX — an existing filter labels them `DroneAware/Alerts` and skips the inbox. This is almost certainly why they get missed, and it has two consequences:
 
@@ -351,3 +352,24 @@ Log: `~/.config/drone-alerts/poller.log`
 This matters more than it looks. The poller's server-side search is date-bounded, so anything older than the window is invisible — **silently**. With the original 3-day default, a machine that was off for four days would come back, scan, and skip the missed alerts without a word. The seen-UID state file already prevents duplicates, so the lookback only needs to cover the longest plausible outage. Widen it; the cost is a slightly larger IMAP fetch.
 
 Verified failure mode: a 6-day-old alert simply did not appear in a scan, with exit 0 and no warning. That is exactly the silent-miss class this system exists to eliminate.
+
+---
+
+## Health check
+
+`scripts/status.sh` reports the whole pipeline in one screen:
+
+```bash
+./scripts/status.sh            # summary
+./scripts/status.sh --topics   # also list the last few notifications
+```
+
+It checks: config loaded, both topic names, launchd loaded and running from the *right* path (flags the `~/Documents` TCC trap), last exit code, message counts on both topics, keychain access, total matching mail, and whether anything is queued but not yet pushed. Exit 0 healthy, 1 needs attention.
+
+Run it whenever an alert feels missing — it answers "is the pipe alive and is anything stuck" in about five seconds.
+
+### Verifying the Gmail backstop
+
+Gmail filters cannot be inspected programmatically, so the backstop can only be confirmed by a **real alert** reaching the backstop topic. Until one does, treat it as unproven.
+
+Note that Gmail sends a confirmation request to the forwarding address when the filter is created. That request arrives as a **push notification on the backstop topic** — so the verification round-trip completes through the very channel being built. Click the link while signed in to the source account. The URL contains `%5B`/`%5D` encoded brackets, which often break link-tapping in notification previews; copy-paste into a browser instead.
