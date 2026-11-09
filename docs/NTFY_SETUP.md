@@ -274,3 +274,72 @@ That is the strongest alerting tier available here, short of the aircard path.
 | N3 | Test whether iOS honours priority 5 through Focus modes | Determines if Path B is worth the extra setup |
 | N4 | Decide whether to self-host | Depends on how sensitive these alerts are |
 | N5 | Add node-health alerts to the same pipe | Offline nodes currently notify nobody |
+
+---
+
+## Deploying the poller as a service (macOS)
+
+`scripts/install-service.sh` deploys the poller as a user LaunchAgent. Two hard-won details are baked in:
+
+### 1. Scripts must live outside `~/Documents`
+
+macOS TCC protects `~/Documents`. A launchd-spawned process that tries to execute a script there fails with:
+
+```
+bash: .../Documents/.../run-poller.sh: Operation not permitted   (exit 126)
+```
+
+The failure is **silent** unless you read launchd's stderr — exactly the class of invisible failure this whole exercise is meant to eliminate.
+
+`install-service.sh` therefore deploys to `~/.local/bin/drone-alerts/`, which is not TCC-protected and needs no permission grant.
+
+### 2. Use launchd, not cron
+
+Writing a crontab non-interactively **hangs indefinitely** on modern macOS (TCC again). `crontab -l` reads fine; `crontab -` writing a file blocks forever. Do not attempt it from a script.
+
+launchd is the native scheduler and needs no special grant for user agents.
+
+```bash
+./scripts/install-service.sh              # deploy + load
+./scripts/install-service.sh --uninstall  # stop + remove
+```
+
+The agent polls every 120 s, runs once at load, and throttles to 60 s so waking from sleep does not cause a burst.
+
+### Reloading after a path change
+
+`launchctl load` will **not** update an already-loaded agent — it silently keeps the old program path. You must unload first:
+
+```bash
+launchctl bootout gui/$(id -u)/com.c4v.drone-alerts-poller
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.c4v.drone-alerts-poller.plist
+```
+
+Verify the running config, not just the file:
+
+```bash
+launchctl print gui/$(id -u)/com.c4v.drone-alerts-poller | grep -E "program|last exit"
+```
+
+`last exit code = 126` means permission denied — almost always the `~/Documents` problem above.
+
+---
+
+## Two-channel setup (cron + backstop)
+
+The deployment runs **both** channels deliberately:
+
+| Channel | Mechanism | Fires when | Priority |
+|---------|-----------|------------|----------|
+| **A — primary** | launchd poller → HTTP API | Mac is awake | **5 (max)** |
+| **B — backstop** | Gmail filter → `ntfy-<topic>@ntfy.sh` | Always (Google's cloud) | Default |
+
+Channel A wakes through Do Not Disturb but dies if the Mac is asleep or off. Channel B never sleeps but arrives at default priority. Together they cover each other's failure mode.
+
+**Backstop filter:** Gmail → Settings → Filters → From `alerts@droneaware.io` → Forward to `ntfy-<backstop-topic>@ntfy.sh`.
+
+### Failure alerting
+
+`run-poller.sh` pushes a **"Drone alert pipe is DOWN"** notification (priority 5) if a poll fails — missing config, auth/keychain failure, or a crash. A bridge that breaks quietly would reproduce the original problem one layer deeper, so it reports its own failure.
+
+Log: `~/.config/drone-alerts/poller.log`
