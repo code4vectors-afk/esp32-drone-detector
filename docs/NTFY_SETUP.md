@@ -343,3 +343,11 @@ Channel A wakes through Do Not Disturb but dies if the Mac is asleep or off. Cha
 `run-poller.sh` pushes a **"Drone alert pipe is DOWN"** notification (priority 5) if a poll fails — missing config, auth/keychain failure, or a crash. A bridge that breaks quietly would reproduce the original problem one layer deeper, so it reports its own failure.
 
 Log: `~/.config/drone-alerts/poller.log`
+
+### Set LOOKBACK generously
+
+`run-poller.sh` passes an explicit `--lookback` (default 14 days, configurable via `LOOKBACK`).
+
+This matters more than it looks. The poller's server-side search is date-bounded, so anything older than the window is invisible — **silently**. With the original 3-day default, a machine that was off for four days would come back, scan, and skip the missed alerts without a word. The seen-UID state file already prevents duplicates, so the lookback only needs to cover the longest plausible outage. Widen it; the cost is a slightly larger IMAP fetch.
+
+Verified failure mode: a 6-day-old alert simply did not appear in a scan, with exit 0 and no warning. That is exactly the silent-miss class this system exists to eliminate.

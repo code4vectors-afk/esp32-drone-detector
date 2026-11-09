@@ -52,7 +52,8 @@ fi
 trap 'rmdir "$LOCK" 2>/dev/null' EXIT
 
 # ── Run ───────────────────────────────────────────────────────────────────────
-OUTPUT=$("$POLLER" --once 2>&1)
+LOOKBACK="${LOOKBACK:-14}"
+OUTPUT=$("$POLLER" --once --lookback "$LOOKBACK" 2>&1)
 RC=$?
 
 if [[ $RC -eq 0 ]]; then
