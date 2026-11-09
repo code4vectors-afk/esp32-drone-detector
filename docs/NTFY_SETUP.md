@@ -14,6 +14,62 @@ If you genuinely need SMS (a real carrier text message), that is the aircard or 
 
 ---
 
+## Verified configuration for this deployment
+
+Confirmed against the live mailbox (`cemirsilva@gmail.com`) on 2026‑10‑11:
+
+| Item | Value |
+|------|-------|
+| Alert sender | `alerts@droneaware.io` (display name "DroneAware Network") |
+| Detection subject | `DroneAware: DJI Mini 5 Pro detected by pev-01` |
+| Health subject | `Node offline — pev-01` **(no `DroneAware:` prefix)** |
+| Volume observed | 23 alerts over 6 days (~4/day) |
+| Existing Gmail label | `DroneAware/Alerts` |
+
+⚠️ **The two subject formats matter.** A filter matching `subject:DroneAware` will silently miss every *"Node offline"* health warning. Match on the **sender** (`alerts@droneaware.io`) to catch both.
+
+⚠️ **Biggest practical gotcha: the alerts are auto-archived.** All 23 were in `[Gmail]/All Mail` and **zero** were in the INBOX — an existing filter labels them `DroneAware/Alerts` and skips the inbox. This is almost certainly why they get missed, and it has two consequences:
+
+- **A Gmail forward filter works fine** (filters run on delivery regardless of label).
+- **Any IMAP poller MUST scan `[Gmail]/All Mail`, not INBOX.** `scripts/gmail-to-ntfy.py` defaults to All Mail for exactly this reason.
+
+Example alert body (detection):
+
+```
+Your node picked up a Remote ID signal.
+Node: pev-01
+Model: DJI Mini 5 Pro
+Drone ID: 1581F8LQC256H0023DX6
+Signal: Wi-Fi Beacon
+Detected at: 2026-11-07 ...
+```
+
+### Working config
+
+Stored locally at `~/.config/drone-alerts/ntfy.env` (mode 600, **never in the repo**):
+
+```bash
+export GMAIL_USER="cemirsilva@gmail.com"
+export GMAIL_MAILBOX="[Gmail]/All Mail"
+export MATCH_FROM="alerts@droneaware.io"
+export NTFY_TOPIC="drone-<random>"
+export NTFY_PRIORITY="5"
+export NTFY_TAGS="rotating_light"
+```
+
+### First-run baseline
+
+Do **not** run the poller plainly on first start — it would push all 23 historical alerts at once. Seed first:
+
+```bash
+./scripts/gmail-to-ntfy.py --once --seed --lookback 60   # marks old mail handled, pushes nothing
+./scripts/gmail-to-ntfy.py --once                        # confirms nothing new
+```
+
+After that, only genuinely new alerts fire.
+
+---
+
 ## Why this works so cleanly for DroneAware
 
 Two facts line up:

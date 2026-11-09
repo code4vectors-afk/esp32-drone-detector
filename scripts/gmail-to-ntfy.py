@@ -36,7 +36,8 @@ ENV VARS
   GMAIL_USER              code4vectors@gmail.com
   GMAIL_APP_PASSWORD      app password; if unset, read from the macOS keychain
   GMAIL_KEYCHAIN_SERVICE  default himalaya-gmail-app-password
-  GMAIL_MAILBOX           default INBOX
+  GMAIL_MAILBOX           default "[Gmail]/All Mail" (alert mail is often
+                          auto-archived by a filter, so INBOX-only misses it)
   MATCH_FROM              substring match on From,  e.g. droneaware
   MATCH_SUBJECT           substring match on Subject, e.g. drone
   MATCH_REQUIRE_ALL       "1" = both must match (default), "0" = either
@@ -233,14 +234,16 @@ def matches(msg, mfrom: str, msubject: str, require_all: bool) -> bool:
     return all(checks) if require_all else any(checks)
 
 
-def scan(dry: bool, since_all: bool, lookback: int = 3) -> int:
+def scan(dry: bool, since_all: bool, lookback: int = 3, seed: bool = False) -> int:
     user = os.environ.get("GMAIL_USER", "code4vectors@gmail.com")
     pw = get_password()
     if not pw:
         fail("no password: set GMAIL_APP_PASSWORD or store one in the keychain")
         return 2
 
-    mailbox = os.environ.get("GMAIL_MAILBOX", "INBOX")
+    # Default to All Mail: alert mail is frequently auto-archived by a
+    # filter, in which case INBOX-only scanning silently sees nothing.
+    mailbox = os.environ.get("GMAIL_MAILBOX") or "[Gmail]/All Mail"
     mfrom = os.environ.get("MATCH_FROM", "").strip()
     msubject = os.environ.get("MATCH_SUBJECT", "").strip()
     require_all = os.environ.get("MATCH_REQUIRE_ALL", "1") != "0"
@@ -259,7 +262,10 @@ def scan(dry: bool, since_all: bool, lookback: int = 3) -> int:
         return 2
 
     try:
-        typ, _ = M.select(mailbox, readonly=True)
+        # imaplib does not quote mailbox names; "[Gmail]/All Mail" contains
+        # a space and will fail to parse unless quoted explicitly.
+        sel = mailbox if mailbox.startswith('"') else f'"{mailbox}"'
+        typ, _ = M.select(sel, readonly=True)
         if typ != "OK":
             fail(f"cannot open mailbox {mailbox!r}")
             return 2
@@ -309,6 +315,13 @@ def scan(dry: bool, since_all: bool, lookback: int = 3) -> int:
                 continue
 
             subject = decode_hdr(msg.get("Subject", "")) or "Alert"
+
+            if seed:
+                # Baseline mode: record existing mail as already-handled so
+                # only FUTURE alerts fire. Avoids a historical flood of
+                # notifications on first run.
+                state["seen"].append(uid_s)
+                continue
             sender = decode_hdr(msg.get("From", ""))
             body = plain_body(msg)
             date_hdr = decode_hdr(msg.get("Date", ""))
@@ -358,6 +371,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="match but do not publish")
     ap.add_argument("--since-all", action="store_true",
                     help="ignore seen-UID state (reprocess everything)")
+    ap.add_argument("--seed", action="store_true",
+                    help="baseline mode: mark current mail as already-handled "
+                         "WITHOUT pushing. Run once before enabling alerts so "
+                         "you do not get a flood of historical notifications.")
     ap.add_argument("--lookback", type=int, default=3, metavar="DAYS",
                     help="how many days back to scan server-side (default 3). "
                          "Gmail tokenizes search, so the server query is kept "
@@ -370,7 +387,7 @@ def main(argv: list[str] | None = None) -> int:
     print()
     print("gmail-to-ntfy" + ("  [DRY RUN]" if args.dry_run else ""))
     print(f"  mailbox : {os.environ.get('GMAIL_USER', 'code4vectors@gmail.com')}"
-          f"/{os.environ.get('GMAIL_MAILBOX', 'INBOX')}")
+          f"/{os.environ.get('GMAIL_MAILBOX') or '[Gmail]/All Mail'}")
     print(f"  match   : from={os.environ.get('MATCH_FROM', '(any)')!r} "
           f"subject={os.environ.get('MATCH_SUBJECT', '(any)')!r}")
     print(f"  target  : {os.environ.get('NTFY_SERVER', 'https://ntfy.sh')}"
@@ -379,12 +396,12 @@ def main(argv: list[str] | None = None) -> int:
     print()
 
     if args.once:
-        return scan(args.dry_run, args.since_all, args.lookback)
+        return scan(args.dry_run, args.since_all, args.lookback, args.seed)
 
     print(f"polling every {args.loop}s — Ctrl-C to stop\n")
     try:
         while True:
-            scan(args.dry_run, args.since_all, args.lookback)
+            scan(args.dry_run, args.since_all, args.lookback, args.seed)
             time.sleep(args.loop)
     except KeyboardInterrupt:
         print("\nstopped")
