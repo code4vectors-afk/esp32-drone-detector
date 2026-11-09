@@ -308,7 +308,9 @@ The node software is licensed with a defined collection scope, and binaries are 
 
 ## Alerting — Getting Detections to a Phone
 
-> Full setup guide: [`docs/ALERTING.md`](docs/ALERTING.md) · Dispatcher: [`scripts/alert.py`](scripts/alert.py) · Preflight: [`scripts/modem-preflight.sh`](scripts/modem-preflight.sh)
+> **Just want alerts on your phone now?** → [`docs/NTFY_SETUP.md`](docs/NTFY_SETUP.md) — 5-minute Gmail-forward path, no code.
+>
+> Full setup guide: [`docs/ALERTING.md`](docs/ALERTING.md) · Dispatcher: [`scripts/alert.py`](scripts/alert.py) · Gmail bridge: [`scripts/gmail-to-ntfy.py`](scripts/gmail-to-ntfy.py) · Modem preflight: [`scripts/modem-preflight.sh`](scripts/modem-preflight.sh)
 
 **Carrier email-to-SMS gateways are dead or dying.** T-Mobile (`@tmomail.net`) retired ~Dec 2024 and AT&T (`@txt.att.net`) shut down ~Jun 2025 — both fail *silently*, so an alert system built on them looks healthy while delivering nothing. Verizon (`@vtext.com`) still works but retires 31 Mar 2027.
 
@@ -341,6 +343,24 @@ An adversary cuts connectivity before an incursion. Every internet-dependent ale
 
 The preflight checks tooling → modem detection → registration → SIM → SMSC → SMS capability, so a failure tells you *which* layer broke instead of just "SMS didn't work".
 
+### Email → push, with no code
+
+**ntfy.sh runs an inbound SMTP server**, so email sent to `ntfy-<topic>@ntfy.sh` becomes a push notification. Verified on this machine: sent from Gmail, push arrived in ~5 seconds, Subject became the title.
+
+```bash
+# 1. pick an unguessable topic, install the ntfy app, subscribe to it
+echo "drone-$(openssl rand -hex 8)"
+
+# 2. Gmail: Settings → Filters → From: <your alert sender> → Forward to
+#    ntfy-YOUR-TOPIC@ntfy.sh
+```
+
+That is the whole setup. Gmail verification completes itself through the same channel — the confirmation email arrives as a notification.
+
+**Limitation:** email publishing cannot set priority (ntfy only reads the Subject). Everything arrives at default priority. For priority control, use `scripts/gmail-to-ntfy.py`, which reads the mailbox over IMAP and publishes via the HTTP API at priority 5 with tags and dedupe — both verified.
+
+⚠️ **ntfy.sh topics are public.** Anyone who guesses the name can read them. Use a long random name, or self-host. See [`docs/NTFY_SETUP.md`](docs/NTFY_SETUP.md).
+
 ### Severity maps to the fusion matrix
 
 | Fusion cell | Severity |
@@ -371,12 +391,14 @@ esp32-drone-detector/
 │   └── esp32-drone-detector.ino    ← The code. Flash this to your ESP32.
 ├── scripts/
 │   ├── alert.py                    ← Multi-channel alert dispatcher
+│   ├── gmail-to-ntfy.py            ← Email → ntfy bridge at priority 5
 │   └── modem-preflight.sh          ← Aircard SMS diagnostic
 ├── docs/
 │   ├── SPEC.md                     ← Reverse‑engineered architecture spec
 │   ├── TECHNICAL_BRIEF.md          ← Full team engineering briefing
 │   ├── FUSION_DESIGN.md            ← ⚠️ WIP: fusion design, findings, open questions
 │   ├── ALERTING.md                 ← Alert channels, carrier gateway status, setup
+│   ├── NTFY_SETUP.md               ← ntfy: 5-minute phone alerts, no code
 │   ├── ESP32_Drone_Detector_Executive_Summary.pdf ← 3‑page exec overview
 │   └── Drone_Traffic_Fingerprinting_Deep_Analysis.pdf ← 6‑page deep analysis
 ├── assets/
